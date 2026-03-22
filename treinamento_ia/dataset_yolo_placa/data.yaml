@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 2
+names: ['Caractere', 'Placa']
+
+roboflow:
+  workspace: andrs-workspace-uyl0r
+  project: alpr_vistoria_v2
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/andrs-workspace-uyl0r/alpr_vistoria_v2/dataset/2

@@ -1,0 +1,21 @@
+description: Ultralytics best model trained on D:/Laudos_GDL/App_Vistoria/treinamento_ia/dataset_yolo_vistoria/data.yaml
+author: Ultralytics
+date: '2026-03-14T11:07:22.238792'
+version: 8.4.21
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: numeros
+args:
+  batch: 1
+  half: false
+  int8: false
+  nms: false
+channels: 3
+end2end: false

@@ -1,0 +1,12 @@
+-- Opcional: usar UUID como PK em public.usuarios (alinhado ao app).
+-- Só execute se a tabela ainda usa bigint e você quer migrar.
+-- Faça backup antes. Em projeto novo, prefira criar já com uuid.
+
+-- Exemplo para tabela nova:
+-- CREATE TABLE public.usuarios (
+--   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+--   nome text NOT NULL UNIQUE,
+--   senha text NOT NULL,
+--   role text NOT NULL CHECK (role IN ('vistoriador', 'admin')),
+--   created_at timestamptz DEFAULT now()
+-- );

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="VistoriaPro">
+  <rect width="512" height="512" rx="96" fill="#141820"/>
+  <rect x="96" y="120" width="320" height="280" rx="24" fill="#1e293b" stroke="#e6a817" stroke-width="8"/>
+  <path d="M160 200h192M160 256h128M160 312h96" stroke="#94a3b8" stroke-width="16" stroke-linecap="round"/>
+  <path d="M340 296l36 36 72-72" fill="none" stroke="#e6a817" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="352" cy="392" r="40" fill="#e6a817" opacity="0.9"/>
+</svg>

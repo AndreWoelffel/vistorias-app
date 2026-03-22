@@ -1,0 +1,82 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 20% 10%;
+    --foreground: 45 100% 96%;
+
+    --card: 220 18% 14%;
+    --card-foreground: 45 100% 96%;
+
+    --popover: 220 18% 14%;
+    --popover-foreground: 45 100% 96%;
+
+    --primary: 45 100% 51%;
+    --primary-foreground: 220 20% 8%;
+
+    --secondary: 220 15% 20%;
+    --secondary-foreground: 45 60% 90%;
+
+    --muted: 220 15% 18%;
+    --muted-foreground: 220 10% 55%;
+
+    --accent: 160 70% 45%;
+    --accent-foreground: 220 20% 8%;
+
+    --destructive: 0 80% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 15% 22%;
+    --input: 220 15% 22%;
+    --ring: 45 100% 51%;
+
+    --radius: 0.75rem;
+
+    --success: 160 70% 45%;
+    --warning: 35 100% 55%;
+    --sync-pending: 35 100% 55%;
+    --sync-done: 160 70% 45%;
+
+    --sidebar-background: 220 18% 12%;
+    --sidebar-foreground: 45 100% 96%;
+    --sidebar-primary: 45 100% 51%;
+    --sidebar-primary-foreground: 220 20% 8%;
+    --sidebar-accent: 220 15% 20%;
+    --sidebar-accent-foreground: 45 100% 96%;
+    --sidebar-border: 220 15% 22%;
+    --sidebar-ring: 45 100% 51%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-family: 'Inter', sans-serif;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+  }
+}
+
+@layer utilities {
+  .text-shadow-glow {
+    text-shadow: 0 0 20px hsl(45 100% 51% / 0.3);
+  }
+
+  .card-glow {
+    box-shadow: 0 0 0 1px hsl(220 15% 22%), 0 4px 20px -4px hsl(0 0% 0% / 0.5);
+  }
+
+  .camera-overlay {
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
+    border: 3px solid hsl(var(--accent));
+    border-radius: 8px;
+  }
+}

@@ -1,0 +1,9 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# SPA: rotas do React Router sem extensão → index.html (arquivos em /assets, /icons, sw.js etc. são servidos antes)
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

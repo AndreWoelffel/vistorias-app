@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 1
+names: ['numeros']
+
+roboflow:
+  workspace: andrs-workspace-uyl0r
+  project: vistoria_num
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/andrs-workspace-uyl0r/vistoria_num/dataset/2
