@@ -8,10 +8,15 @@ import {
   getLeilaoById,
   getVistoriaById,
   getVistoriasByLeilao,
+  normalizeVistoriaStatusSync,
   updateLeilao,
   updateVistoria,
   type Vistoria,
 } from '@/lib/db';
+
+/** Mensagem padrão para `aguardando_ajuste` (duplicidade local). */
+export const SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE =
+  'Vistoria salva localmente, mas há conflito de duplicidade. Ajuste antes de sincronizar.';
 import { getCreatedBySnapshot } from '@/services/currentUserService';
 import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict';
 
@@ -466,7 +471,11 @@ export async function syncInspectionFromLocal(
     }
     return 'fail';
   }
-  if (v.statusSync === 'sincronizado') {
+  const ns0 = normalizeVistoriaStatusSync(v.statusSync);
+  if (ns0 === 'aguardando_ajuste' || ns0 === 'conflito_duplicidade') {
+    return 'duplicate';
+  }
+  if (ns0 === 'sincronizado') {
     return 'ok';
   }
 
@@ -511,7 +520,8 @@ export async function syncInspectionFromLocal(
   });
   if (ok) return 'ok';
   const v2 = await getVistoriaById(localVistoriaId);
-  if (v2?.statusSync === 'conflito_duplicidade') return 'duplicate';
+  const ns2 = normalizeVistoriaStatusSync(v2?.statusSync);
+  if (ns2 === 'conflito_duplicidade' || ns2 === 'aguardando_ajuste') return 'duplicate';
   return 'fail';
 }
 

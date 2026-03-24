@@ -554,8 +554,12 @@ function ReasonChip({ reason }: { reason: AttentionListItem["reasons"][number] }
   const map: Record<AttentionListItem["reasons"][number], { label: string; className: string }> = {
     erro_sync: { label: "Erro sync", className: "bg-red-500/15 text-red-700 dark:text-red-300" },
     conflito_duplicidade: {
-      label: "Duplicidade",
+      label: "Conflito na nuvem",
       className: "bg-orange-500/15 text-orange-800 dark:text-orange-200",
+    },
+    aguardando_ajuste: {
+      label: "Aguardando ajuste",
+      className: "bg-amber-500/20 text-amber-950 dark:text-amber-100",
     },
     foto_falhou: { label: "Foto", className: "bg-violet-500/15 text-violet-800 dark:text-violet-200" },
     pendente_sync: { label: "Pendente", className: "bg-amber-500/15 text-amber-800 dark:text-amber-200" },

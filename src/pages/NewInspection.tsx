@@ -9,7 +9,10 @@ import { CameraCapture } from '@/components/CameraCapture';
 import { StickerCameraCapture } from '@/components/StickerCameraCapture';
 import { addVistoria, updateVistoria } from '@/hooks/useVistorias';
 import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync } from '@/lib/db';
-import { findLocalDuplicateVistoria } from '@/services/inspectionService';
+import {
+  findLocalDuplicateVistoria,
+  SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+} from '@/services/inspectionService';
 import { ocrWithVoting, compressImage, detectOQAmbiguity, preloadAlprModels, detectStickerBox, extractAndPrepareSticker } from '@/lib/imageUtils';
 import { readStickerNumber } from '@/services/ocrService';
 import { useAuth } from '@/hooks/useAuth';
@@ -242,16 +245,6 @@ export default function NewInspection() {
       toast({ title: 'Campos obrigatórios', description: 'Preencha placa e número.', variant: 'destructive' });
       return;
     }
-    const dupLocal = await findLocalDuplicateVistoria(id, placa.toUpperCase(), numero);
-    if (dupLocal) {
-      toast({
-        title: 'Duplicidade no dispositivo',
-        description:
-          'Já existe vistoria com a mesma placa ou o mesmo número neste leilão. Ajuste os dados ou edite o registro existente.',
-        variant: 'destructive',
-      });
-      return;
-    }
     setStep('saving');
     try {
       const createdBy =
@@ -265,13 +258,15 @@ export default function NewInspection() {
           : `vis-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
       const nowMs = Date.now();
+      const dupOther = await findLocalDuplicateVistoria(id, placa.toUpperCase(), numero);
       const localId = await addVistoria({
         leilaoId: id,
         placa: placa.toUpperCase(),
         numeroVistoria: numero,
         vistoriador: user?.nome || '',
         fotos,
-        statusSync: 'pendente_sync',
+        statusSync: dupOther ? 'aguardando_ajuste' : 'pendente_sync',
+        syncMessage: dupOther ? SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE : undefined,
         createdAt: new Date(),
         updatedAt: nowMs,
         localUuid,
@@ -279,18 +274,25 @@ export default function NewInspection() {
         createdByUserId,
       });
 
-      await addToQueue({
-        type: 'create',
-        entity: 'vistoria',
-        payload: { localVistoriaId: localId },
-      });
-      const { processQueue } = await import('@/services/syncService');
-      await processQueue();
+      if (!dupOther) {
+        await addToQueue({
+          type: 'create',
+          entity: 'vistoria',
+          payload: { localVistoriaId: localId },
+        });
+        const { processQueue } = await import('@/services/syncService');
+        await processQueue();
+      }
 
       const v = await getVistoriaById(localId);
       const st = normalizeVistoriaStatusSync(v?.statusSync);
 
-      if (st === 'conflito_duplicidade') {
+      if (st === 'aguardando_ajuste') {
+        toast({
+          title: 'Salva localmente',
+          description: SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+        });
+      } else if (st === 'conflito_duplicidade') {
         toast({
           title: 'Conflito: duplicidade na nuvem',
           description:

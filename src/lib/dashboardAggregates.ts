@@ -187,7 +187,10 @@ export async function dashboardCountsForLeilao(leilaoId: number) {
   const week = all.filter((v) => new Date(v.createdAt).getTime() >= weekAgo).length;
   const total = all.length;
   const synced = all.filter((v) => normalizeVistoriaStatusSync(v.statusSync) === "sincronizado").length;
-  const conflito = all.filter((v) => normalizeVistoriaStatusSync(v.statusSync) === "conflito_duplicidade").length;
+  const conflito = all.filter((v) => {
+    const n = normalizeVistoriaStatusSync(v.statusSync);
+    return n === "conflito_duplicidade" || n === "aguardando_ajuste";
+  }).length;
   const erro = all.filter((v) => normalizeVistoriaStatusSync(v.statusSync) === "erro_sync").length;
   const fotoFalha = all.filter((v) => v.fotoUploadFailed).length;
   const pendingQueue = await countPendingQueueForLeilao(leilaoId);
@@ -235,6 +238,7 @@ export async function dashboardCountsForLeilao(leilaoId: number) {
 export type AttentionReason =
   | "erro_sync"
   | "conflito_duplicidade"
+  | "aguardando_ajuste"
   | "foto_falhou"
   | "pendente_sync"
   | "fila_com_falha";
@@ -249,7 +253,7 @@ export type AttentionListItem = {
 };
 
 function reasonPriority(r: AttentionReason): number {
-  if (r === "conflito_duplicidade") return 0;
+  if (r === "conflito_duplicidade" || r === "aguardando_ajuste") return 0;
   if (r === "erro_sync" || r === "fila_com_falha") return 1;
   if (r === "foto_falhou") return 2;
   return 3;
@@ -278,6 +282,7 @@ export async function listAttentionItems(leilaoId: number): Promise<AttentionLis
     const reasons = new Set<AttentionReason>();
     if (st === "erro_sync") reasons.add("erro_sync");
     if (st === "conflito_duplicidade") reasons.add("conflito_duplicidade");
+    if (st === "aguardando_ajuste") reasons.add("aguardando_ajuste");
     if (v.fotoUploadFailed) reasons.add("foto_falhou");
     if (st === "pendente_sync") reasons.add("pendente_sync");
     if (actionableVids.has(v.id)) reasons.add("pendente_sync");

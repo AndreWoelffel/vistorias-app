@@ -48,7 +48,9 @@ export type VistoriaStatusSync =
   | 'pendente_sync'
   | 'sincronizado'
   | 'erro_sync'
-  | 'conflito_duplicidade';
+  | 'conflito_duplicidade'
+  /** Duplicidade local (ou a corrigir): não sincroniza até o usuário ajustar. */
+  | 'aguardando_ajuste';
 
 export interface Vistoria {
   id?: number;
@@ -85,11 +87,20 @@ export function normalizeVistoriaStatusSync(
     s === 'rascunho' ||
     s === 'pendente_sync' ||
     s === 'erro_sync' ||
-    s === 'conflito_duplicidade'
+    s === 'conflito_duplicidade' ||
+    s === 'aguardando_ajuste'
   ) {
     return s;
   }
   return 'pendente_sync';
+}
+
+/** Bloqueia envio à nuvem até correção (duplicidade local ou rejeição na sync). */
+export function isVistoriaSyncBlockedByDuplicate(
+  s: Vistoria['statusSync'] | undefined,
+): boolean {
+  const n = normalizeVistoriaStatusSync(s);
+  return n === 'aguardando_ajuste' || n === 'conflito_duplicidade';
 }
 
 /** Catálogo local de usuários (futuro: alinhar a Supabase Auth / profiles). */

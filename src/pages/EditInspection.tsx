@@ -12,7 +12,10 @@ import {
   removeVistoriaUpdateFromQueue,
   normalizeVistoriaStatusSync,
 } from '@/lib/db';
-import { findLocalDuplicateVistoria } from '@/services/inspectionService';
+import {
+  findLocalDuplicateVistoria,
+  SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+} from '@/services/inspectionService';
 import { compressImage } from '@/lib/imageUtils';
 import { toast } from '@/hooks/use-toast';
 import type { Vistoria } from '@/lib/db';
@@ -64,24 +67,38 @@ export default function EditInspection() {
       return;
     }
     if (!vistoria) return;
-    const dupLocal = await findLocalDuplicateVistoria(
+    const dupOther = await findLocalDuplicateVistoria(
       vistoria.leilaoId,
       placa.toUpperCase(),
       numero,
       vistoriaId,
     );
-    if (dupLocal) {
-      toast({
-        title: 'Duplicidade',
-        description: 'Outra vistoria neste leilão já usa esta placa ou este número.',
-        variant: 'destructive',
-      });
-      return;
-    }
     setSaving(true);
     try {
       const norm = normalizeVistoriaStatusSync(vistoria.statusSync);
-      const clearingConflictOrError = norm === 'conflito_duplicidade' || norm === 'erro_sync';
+
+      if (dupOther) {
+        await updateVistoria(vistoriaId, {
+          placa: placa.toUpperCase(),
+          numeroVistoria: numero,
+          vistoriador,
+          fotos,
+          updatedAt: Date.now(),
+          statusSync: 'aguardando_ajuste',
+          syncMessage: SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+        });
+        await removeVistoriaUpdateFromQueue(vistoriaId);
+        await removeVistoriaCreateFromQueue(vistoriaId);
+        toast({
+          title: 'Salva localmente',
+          description: SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+        });
+        navigate(-1);
+        return;
+      }
+
+      const clearingConflictOrError =
+        norm === 'conflito_duplicidade' || norm === 'aguardando_ajuste' || norm === 'erro_sync';
 
       await updateVistoria(vistoriaId, {
         placa: placa.toUpperCase(),

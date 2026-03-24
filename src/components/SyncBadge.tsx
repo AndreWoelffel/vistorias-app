@@ -11,6 +11,20 @@ interface SyncBadgeProps {
 export function SyncBadge({ status, fotoUploadFailed, className }: SyncBadgeProps) {
   const n = normalizeVistoriaStatusSync(status);
 
+  if (n === "aguardando_ajuste") {
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold text-amber-950 dark:text-amber-100",
+          className,
+        )}
+      >
+        <AlertTriangle className="h-3 w-3 shrink-0" />
+        Aguardando ajuste
+      </span>
+    );
+  }
+
   if (n === "conflito_duplicidade") {
     return (
       <span
@@ -20,7 +34,7 @@ export function SyncBadge({ status, fotoUploadFailed, className }: SyncBadgeProp
         )}
       >
         <AlertTriangle className="h-3 w-3 shrink-0" />
-        Duplicidade
+        Conflito de duplicidade
       </span>
     );
   }

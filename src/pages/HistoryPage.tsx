@@ -7,7 +7,7 @@ import { AppHeader } from '@/components/AppHeader';
 import { SyncBadge } from '@/components/SyncBadge';
 import { useVistorias } from '@/hooks/useVistorias';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
-import { normalizeVistoriaStatusSync, type Vistoria } from '@/lib/db';
+import { isVistoriaSyncBlockedByDuplicate, normalizeVistoriaStatusSync, type Vistoria } from '@/lib/db';
 import * as XLSX from 'xlsx';
 
 function statusLabelForExport(v: Vistoria): string {
@@ -17,8 +17,10 @@ function statusLabelForExport(v: Vistoria): string {
       ? 'Sincronizado'
       : n === 'erro_sync'
         ? 'Erro de sincronização'
-        : n === 'conflito_duplicidade'
-          ? 'Conflito (duplicidade)'
+        : n === 'aguardando_ajuste'
+          ? 'Aguardando ajuste (duplicidade local)'
+          : n === 'conflito_duplicidade'
+            ? 'Conflito (duplicidade na nuvem)'
           : n === 'rascunho'
             ? 'Rascunho'
             : 'Pendente de sincronização';
@@ -152,7 +154,11 @@ export default function HistoryPage() {
                 key={v.id}
                 id={v.id != null ? `vistoria-${v.id}` : undefined}
                 onClick={() => navigate(`/editar/${v.id}`)}
-                className="w-full text-left py-1.5 px-2 flex items-center gap-2 active:bg-secondary/50 transition-colors"
+                className={
+                  isVistoriaSyncBlockedByDuplicate(v.statusSync)
+                    ? 'w-full text-left py-1.5 px-2 flex items-center gap-2 active:bg-secondary/50 transition-colors border-l-2 border-amber-500/80 bg-amber-500/5'
+                    : 'w-full text-left py-1.5 px-2 flex items-center gap-2 active:bg-secondary/50 transition-colors'
+                }
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">

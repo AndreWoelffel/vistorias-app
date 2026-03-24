@@ -7,11 +7,13 @@ import {
   removeFromQueue,
   applyQueueFailure,
   getLeilaoById,
+  getVistoriaById,
   updateLeilao,
   updateVistoria,
   deleteVistoriasByLeilao,
   deleteLeilaoFromDb,
   setSyncQueueItemRetryPaused,
+  normalizeVistoriaStatusSync,
   type SyncQueueItem,
 } from '@/lib/db';
 import { syncLeilaoToCloud } from '@/services/leilaoService';
@@ -372,7 +374,15 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     if (vid == null || !Number.isFinite(vid)) return 'done';
     const r = await syncInspectionFromLocal(vid);
     if (r === 'duplicate') {
-      return 'done';
+      if (item.id != null) {
+        await setSyncQueueItemRetryPaused(item.id, true);
+      }
+      if (import.meta.env.DEV) {
+        console.warn(
+          '[sync] vistoria/create pausado: duplicidade ou aguardando ajuste (sem retry até correção).',
+        );
+      }
+      return 'blocked';
     }
     return r === 'ok' ? 'done' : 'fail';
   }
@@ -381,8 +391,21 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     const payload = item.payload as { localVistoriaId?: number };
     const vid = payload.localVistoriaId;
     if (vid == null || !Number.isFinite(vid)) return 'done';
+    const v0 = await getVistoriaById(vid);
+    const n0 = normalizeVistoriaStatusSync(v0?.statusSync);
+    if (n0 === 'aguardando_ajuste' || n0 === 'conflito_duplicidade') {
+      if (item.id != null) await setSyncQueueItemRetryPaused(item.id, true);
+      return 'blocked';
+    }
     const ok = await syncVistoriaUpdateToCloud(vid);
-    return ok ? 'done' : 'fail';
+    if (ok) return 'done';
+    const v1 = await getVistoriaById(vid);
+    const n1 = normalizeVistoriaStatusSync(v1?.statusSync);
+    if (n1 === 'conflito_duplicidade' || n1 === 'aguardando_ajuste') {
+      if (item.id != null) await setSyncQueueItemRetryPaused(item.id, true);
+      return 'blocked';
+    }
+    return 'fail';
   }
 
   if (import.meta.env.DEV) console.warn("[sync] Item de fila não reconhecido:", item);
