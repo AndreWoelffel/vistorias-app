@@ -42,6 +42,14 @@ export interface SyncQueueItem {
   retryPaused?: boolean;
 }
 
+/** Estados de sincronização da vistoria local (legado: `pendente` tratado como `pendente_sync`). */
+export type VistoriaStatusSync =
+  | 'rascunho'
+  | 'pendente_sync'
+  | 'sincronizado'
+  | 'erro_sync'
+  | 'conflito_duplicidade';
+
 export interface Vistoria {
   id?: number;
   leilaoId: number;
@@ -49,7 +57,7 @@ export interface Vistoria {
   numeroVistoria: string;
   vistoriador: string;
   fotos: Blob[];
-  statusSync: 'pendente' | 'sincronizado';
+  statusSync: VistoriaStatusSync | 'pendente' | 'sincronizado';
   createdAt: Date;
   /** UUID estável (gerado no app) → coluna `external_id` (text) no Supabase. */
   localUuid?: string;
@@ -61,6 +69,27 @@ export interface Vistoria {
   updatedAt?: number;
   /** PK UUID em `public.vistorias` (Realtime DELETE / rastreio). */
   cloudVistoriaId?: string;
+  /** Mensagem curta para UI (erro de sync, duplicidade, etc.). */
+  syncMessage?: string;
+  /** Upload da foto ao Storage falhou (vistoria pode ter seguido sem URL). */
+  fotoUploadFailed?: boolean;
+}
+
+/** Normaliza legado `pendente` → `pendente_sync` para lógica e UI. */
+export function normalizeVistoriaStatusSync(
+  s: Vistoria['statusSync'] | undefined,
+): VistoriaStatusSync | 'sincronizado' {
+  if (s === 'pendente') return 'pendente_sync';
+  if (s === 'sincronizado') return 'sincronizado';
+  if (
+    s === 'rascunho' ||
+    s === 'pendente_sync' ||
+    s === 'erro_sync' ||
+    s === 'conflito_duplicidade'
+  ) {
+    return s;
+  }
+  return 'pendente_sync';
 }
 
 /** Catálogo local de usuários (futuro: alinhar a Supabase Auth / profiles). */
@@ -91,8 +120,8 @@ let dbPromise: Promise<IDBPDatabase<any>> | null = null;
 
 function getDB() {
   if (!dbPromise) {
-    dbPromise = openDB('VistoriaDB', 10, {
-      upgrade(db, oldVersion) {
+    dbPromise = openDB('VistoriaDB', 11, {
+      async upgrade(db, oldVersion, _newVersion, transaction) {
         /** v5: remove leilões antigos (ex.: seed/mock) e recria store — fonte de verdade passa a ser Supabase + cache local. */
         if (oldVersion > 0 && oldVersion < 5 && db.objectStoreNames.contains('leiloes')) {
           db.deleteObjectStore('leiloes');
@@ -115,6 +144,18 @@ function getDB() {
         /** v7/v8: vistorias usam localUuid; fila com failed/nextAttemptAfter — sem mudança de store. */
         /** v9: Leilao.updatedAt / Vistoria.updatedAt (ms) para conflitos com Supabase — só metadado no objeto. */
         /** v10: Vistoria.cloudVistoriaId — metadado no objeto (sem mudança de store). */
+        /** v11: statusSync estendido; migrar `pendente` → `pendente_sync`. */
+        if (oldVersion < 11 && db.objectStoreNames.contains('vistorias')) {
+          const store = transaction.objectStore('vistorias');
+          let cursor = await store.openCursor();
+          while (cursor) {
+            const v = cursor.value as Vistoria;
+            if (v.statusSync === 'pendente') {
+              await cursor.update({ ...v, statusSync: 'pendente_sync' } as Vistoria);
+            }
+            cursor = await cursor.continue();
+          }
+        }
       },
     });
   }
@@ -309,6 +350,20 @@ export async function removeVistoriaUpdateFromQueue(localVistoriaId: number): Pr
   for (const item of items) {
     if (item.id == null) continue;
     if (item.entity !== 'vistoria' || item.type !== 'update') continue;
+    const p = item.payload as { localVistoriaId?: number };
+    if (p.localVistoriaId === localVistoriaId) await tx.store.delete(item.id);
+  }
+  await tx.done;
+}
+
+/** Remove `vistoria/create` pendentes para evitar duplicar após correção de conflito. */
+export async function removeVistoriaCreateFromQueue(localVistoriaId: number): Promise<void> {
+  const items = await getQueue();
+  const db = await getDB();
+  const tx = db.transaction('syncQueue', 'readwrite');
+  for (const item of items) {
+    if (item.id == null) continue;
+    if (item.entity !== 'vistoria' || item.type !== 'create') continue;
     const p = item.payload as { localVistoriaId?: number };
     if (p.localVistoriaId === localVistoriaId) await tx.store.delete(item.id);
   }

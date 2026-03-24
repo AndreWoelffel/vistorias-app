@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Loader2, Plus, Users, ShieldAlert } from 'lucide-react';
+import { Loader2, Plus, Users, ShieldAlert, UserX, UserCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -29,13 +29,14 @@ const PIN_REGEX = /^\d{4}$/;
 export default function UsuariosPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { usuarios, loading, createUsuario, refresh } = useSupabaseUsuarios();
+  const { usuarios, loading, createUsuario, refresh, toggleUsuarioAtivo } = useSupabaseUsuarios();
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [nome, setNome] = useState('');
   const [senha, setSenha] = useState('');
   const [role, setRole] = useState<AppUsuarioRole>('vistoriador');
   const [saving, setSaving] = useState(false);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
 
   useEffect(() => {
     if (user && user.role !== 'admin') {
@@ -88,6 +89,29 @@ export default function UsuariosPage() {
       });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleToggleAtivo = async (usuarioId: string, nextAtivo: boolean) => {
+    if (!confirm(nextAtivo ? 'Reativar este usuário?' : 'Desativar este usuário? Ele não poderá mais entrar no app.')) {
+      return;
+    }
+    setTogglingId(usuarioId);
+    try {
+      await toggleUsuarioAtivo(usuarioId, nextAtivo);
+      toast({
+        title: nextAtivo ? 'Usuário reativado' : 'Usuário desativado',
+        description: nextAtivo ? 'O login voltou a ser permitido.' : 'O registro permanece no banco para histórico.',
+      });
+    } catch (err) {
+      console.error(err);
+      toast({
+        title: 'Não foi possível alterar',
+        description: err instanceof Error ? err.message : 'Tente novamente.',
+        variant: 'destructive',
+      });
+    } finally {
+      setTogglingId(null);
     }
   };
 
@@ -150,8 +174,49 @@ export default function UsuariosPage() {
                   <Badge variant={u.role === 'admin' ? 'default' : 'secondary'} className="text-[10px] shrink-0">
                     {u.role}
                   </Badge>
+                  <Badge
+                    variant={u.ativo === false ? 'destructive' : 'outline'}
+                    className="text-[10px] shrink-0"
+                  >
+                    {u.ativo === false ? 'Inativo' : 'Ativo'}
+                  </Badge>
                 </div>
                 <p className="text-[11px] text-muted-foreground">ID: {u.id}</p>
+                <div className="pt-2">
+                  {u.ativo === false ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      className="h-9 gap-1.5"
+                      disabled={togglingId === u.id}
+                      onClick={() => void handleToggleAtivo(u.id, true)}
+                    >
+                      {togglingId === u.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <UserCheck className="h-4 w-4" />
+                      )}
+                      Reativar
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-9 gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10"
+                      disabled={togglingId === u.id}
+                      onClick={() => void handleToggleAtivo(u.id, false)}
+                    >
+                      {togglingId === u.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <UserX className="h-4 w-4" />
+                      )}
+                      Desativar
+                    </Button>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

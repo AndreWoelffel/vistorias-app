@@ -36,9 +36,5 @@ export function PwaStatusBadge() {
     );
   }
 
-  return (
-    <Badge variant="outline" className="text-[10px] text-muted-foreground">
-      Pode instalar pelo menu do navegador
-    </Badge>
-  );
+  return null;
 }

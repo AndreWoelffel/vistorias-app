@@ -9,9 +9,13 @@ export type SupabaseUsuarioRow = {
   senha: string;
   role: AppUsuarioRole;
   created_at?: string | null;
+  /** Desativação lógica (default true). Requer coluna `ativo` no Supabase. */
+  ativo?: boolean | null;
 };
 
-export type UsuarioListItem = Pick<SupabaseUsuarioRow, 'id' | 'nome' | 'role'>;
+export type UsuarioListItem = Pick<SupabaseUsuarioRow, 'id' | 'nome' | 'role'> & {
+  ativo?: boolean | null;
+};
 
 function normalizeUsuarioId(value: unknown): string {
   if (value == null) return '';
@@ -23,7 +27,9 @@ function rowToUsuarioListItem(row: Record<string, unknown>): UsuarioListItem | n
   const nome = String(row.nome ?? '').trim();
   const role = row.role === 'admin' || row.role === 'vistoriador' ? row.role : null;
   if (!id || !nome || !role) return null;
-  return { id, nome, role };
+  const ativoRaw = row.ativo;
+  const ativo = ativoRaw === false ? false : ativoRaw === true ? true : true;
+  return { id, nome, role, ativo };
 }
 
 function isUniqueViolation(error: { code?: string } | null | undefined): boolean {
@@ -38,7 +44,7 @@ const PIN_4 = /^\d{4}$/;
 export async function listAllUsuariosAdmin(): Promise<UsuarioListItem[]> {
   const { data, error } = await supabase
     .from('usuarios')
-    .select('id, nome, role')
+    .select('id, nome, role, ativo')
     .order('nome', { ascending: true });
 
   if (error) {
@@ -76,8 +82,9 @@ export async function createUsuarioSupabase(params: {
       nome: trimmed,
       senha: params.senha,
       role: params.role,
+      ativo: true,
     })
-    .select('id, nome, role')
+    .select('id, nome, role, ativo')
     .maybeSingle();
 
   if (error) {
@@ -104,8 +111,9 @@ export async function createUsuarioSupabase(params: {
 export async function listUsersByRole(role: AppUsuarioRole): Promise<UsuarioListItem[]> {
   const { data, error } = await supabase
     .from('usuarios')
-    .select('id, nome, role')
+    .select('id, nome, role, ativo')
     .eq('role', role)
+    .eq('ativo', true)
     .order('nome', { ascending: true });
 
   if (error) {
@@ -131,6 +139,7 @@ export async function login(nomeLogin: string, senha: string): Promise<SupabaseU
     .select('*')
     .eq('nome', nomeLogin.trim())
     .eq('senha', senha)
+    .eq('ativo', true)
     .maybeSingle();
 
   if (error) {
@@ -163,5 +172,28 @@ export async function login(nomeLogin: string, senha: string): Promise<SupabaseU
     senha: String(row.senha ?? ''),
     role,
     created_at: row.created_at != null ? String(row.created_at) : null,
+    ativo: row.ativo !== false,
   };
+}
+
+/**
+ * Ativa/desativa usuário (desativação lógica). Não remove linha no Supabase.
+ * Impede desativar o único admin ativo.
+ */
+export async function setUsuarioAtivo(usuarioId: string, ativo: boolean): Promise<void> {
+  const list = await listAllUsuariosAdmin();
+  const target = list.find((u) => u.id === usuarioId);
+  if (!target) {
+    throw new Error('Usuário não encontrado.');
+  }
+  if (!ativo && target.role === 'admin') {
+    const activeAdmins = list.filter((u) => u.role === 'admin' && u.ativo !== false);
+    if (activeAdmins.length === 1 && activeAdmins[0]?.id === usuarioId) {
+      throw new Error('Não é possível desativar o único administrador ativo.');
+    }
+  }
+  const { error } = await supabase.from('usuarios').update({ ativo }).eq('id', usuarioId);
+  if (error) {
+    throw new Error(error.message);
+  }
 }

@@ -8,6 +8,7 @@ import {
   applyQueueFailure,
   getLeilaoById,
   updateLeilao,
+  updateVistoria,
   deleteVistoriasByLeilao,
   deleteLeilaoFromDb,
   setSyncQueueItemRetryPaused,
@@ -202,13 +203,33 @@ function formatErr(e: unknown): string {
   return String(e ?? 'erro desconhecido');
 }
 
-async function recordFailure(itemId: number, err?: unknown): Promise<void> {
+async function recordFailure(itemId: number, err?: unknown): Promise<{ permanentFailure: boolean }> {
   const { permanentFailure, retries } = await applyQueueFailure(itemId, {
     maxRetries: MAX_SYNC_RETRIES,
     errorMessage: formatErr(err),
   });
   if (permanentFailure) {
     console.error('[sync] Erro detalhado:', err != null ? err : `Fila: status "failed" (id=${itemId}, retries=${retries})`);
+  }
+  return { permanentFailure };
+}
+
+async function markVistoriaErroSyncIfPermanent(
+  item: SyncQueueItem,
+  permanentFailure: boolean,
+  err?: unknown,
+): Promise<void> {
+  if (!permanentFailure || item.entity !== 'vistoria') return;
+  const p = item.payload as { localVistoriaId?: number };
+  const vid = p.localVistoriaId;
+  if (vid == null || !Number.isFinite(vid)) return;
+  try {
+    await updateVistoria(vid, {
+      statusSync: 'erro_sync',
+      syncMessage: formatErr(err).slice(0, 240),
+    });
+  } catch {
+    /* ignore */
   }
 }
 
@@ -349,8 +370,11 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     const payload = item.payload as { localVistoriaId?: number };
     const vid = payload.localVistoriaId;
     if (vid == null || !Number.isFinite(vid)) return 'done';
-    const ok = await syncInspectionFromLocal(vid);
-    return ok ? 'done' : 'fail';
+    const r = await syncInspectionFromLocal(vid);
+    if (r === 'duplicate') {
+      return 'done';
+    }
+    return r === 'ok' ? 'done' : 'fail';
   }
 
   if (item.entity === 'vistoria' && item.type === 'update') {
@@ -468,14 +492,16 @@ export async function processQueue(): Promise<ProcessQueueResult> {
           } else if (result === 'skip') {
             /* aguarda outra rodada */
           } else {
-            await recordFailure(item.id);
+            const { permanentFailure } = await recordFailure(item.id);
+            await markVistoriaErroSyncIfPermanent(item, permanentFailure);
             failed++;
             progressed = true;
           }
         } catch (e) {
           console.error("[sync] Erro detalhado:", e);
           if (import.meta.env.DEV) console.log("[sync] Item com exceção:", item);
-          await recordFailure(item.id, e);
+          const { permanentFailure } = await recordFailure(item.id, e);
+          await markVistoriaErroSyncIfPermanent(item, permanentFailure, e);
           failed++;
           progressed = true;
         }

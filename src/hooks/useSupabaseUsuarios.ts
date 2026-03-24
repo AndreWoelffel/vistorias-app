@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   listAllUsuariosAdmin,
   createUsuarioSupabase,
+  setUsuarioAtivo,
   type UsuarioListItem,
   type AppUsuarioRole,
 } from '@/services/userService';
@@ -43,5 +44,13 @@ export function useSupabaseUsuarios() {
     [refresh],
   );
 
-  return { usuarios: usuarios ?? [], loading, refresh, createUsuario };
+  const toggleUsuarioAtivo = useCallback(
+    async (usuarioId: string, ativo: boolean) => {
+      await setUsuarioAtivo(usuarioId, ativo);
+      await refresh();
+    },
+    [refresh],
+  );
+
+  return { usuarios: usuarios ?? [], loading, refresh, createUsuario, toggleUsuarioAtivo };
 }

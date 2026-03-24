@@ -6,8 +6,13 @@ import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { getVistoriaById, updateVistoria, deleteVistoria } from '@/hooks/useVistorias';
-import { addToQueue, removeVistoriaUpdateFromQueue } from '@/lib/db';
-import { readStableUuid } from '@/services/inspectionService';
+import {
+  addToQueue,
+  removeVistoriaCreateFromQueue,
+  removeVistoriaUpdateFromQueue,
+  normalizeVistoriaStatusSync,
+} from '@/lib/db';
+import { findLocalDuplicateVistoria } from '@/services/inspectionService';
 import { compressImage } from '@/lib/imageUtils';
 import { toast } from '@/hooks/use-toast';
 import type { Vistoria } from '@/lib/db';
@@ -58,10 +63,25 @@ export default function EditInspection() {
       toast({ title: 'Campos obrigatórios', variant: 'destructive' });
       return;
     }
+    if (!vistoria) return;
+    const dupLocal = await findLocalDuplicateVistoria(
+      vistoria.leilaoId,
+      placa.toUpperCase(),
+      numero,
+      vistoriaId,
+    );
+    if (dupLocal) {
+      toast({
+        title: 'Duplicidade',
+        description: 'Outra vistoria neste leilão já usa esta placa ou este número.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setSaving(true);
     try {
-      const wasSynced = vistoria?.statusSync === 'sincronizado';
-      const stableId = vistoria ? readStableUuid(vistoria) : undefined;
+      const norm = normalizeVistoriaStatusSync(vistoria.statusSync);
+      const clearingConflictOrError = norm === 'conflito_duplicidade' || norm === 'erro_sync';
 
       await updateVistoria(vistoriaId, {
         placa: placa.toUpperCase(),
@@ -69,15 +89,34 @@ export default function EditInspection() {
         vistoriador,
         fotos,
         updatedAt: Date.now(),
+        ...(clearingConflictOrError
+          ? {
+              statusSync: 'pendente_sync',
+              syncMessage: undefined,
+            }
+          : {}),
       });
 
-      if (wasSynced && stableId) {
-        await removeVistoriaUpdateFromQueue(vistoriaId);
-        await addToQueue({
-          type: 'update',
-          entity: 'vistoria',
-          payload: { localVistoriaId: vistoriaId },
-        });
+      await removeVistoriaUpdateFromQueue(vistoriaId);
+      await removeVistoriaCreateFromQueue(vistoriaId);
+
+      const fresh = await getVistoriaById(vistoriaId);
+      const fn = normalizeVistoriaStatusSync(fresh?.statusSync);
+      if (fn !== 'rascunho') {
+        const hasCloud = Boolean(fresh?.cloudVistoriaId);
+        if (hasCloud) {
+          await addToQueue({
+            type: 'update',
+            entity: 'vistoria',
+            payload: { localVistoriaId: vistoriaId },
+          });
+        } else {
+          await addToQueue({
+            type: 'create',
+            entity: 'vistoria',
+            payload: { localVistoriaId: vistoriaId },
+          });
+        }
         const { processQueue } = await import('@/services/syncService');
         await processQueue();
       }

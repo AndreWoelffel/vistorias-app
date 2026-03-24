@@ -8,7 +8,8 @@ import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { StickerCameraCapture } from '@/components/StickerCameraCapture';
 import { addVistoria, updateVistoria } from '@/hooks/useVistorias';
-import { addToQueue, getVistoriaById } from '@/lib/db';
+import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync } from '@/lib/db';
+import { findLocalDuplicateVistoria } from '@/services/inspectionService';
 import { ocrWithVoting, compressImage, detectOQAmbiguity, preloadAlprModels, detectStickerBox, extractAndPrepareSticker } from '@/lib/imageUtils';
 import { readStickerNumber } from '@/services/ocrService';
 import { useAuth } from '@/hooks/useAuth';
@@ -241,6 +242,16 @@ export default function NewInspection() {
       toast({ title: 'Campos obrigatórios', description: 'Preencha placa e número.', variant: 'destructive' });
       return;
     }
+    const dupLocal = await findLocalDuplicateVistoria(id, placa.toUpperCase(), numero);
+    if (dupLocal) {
+      toast({
+        title: 'Duplicidade no dispositivo',
+        description:
+          'Já existe vistoria com a mesma placa ou o mesmo número neste leilão. Ajuste os dados ou edite o registro existente.',
+        variant: 'destructive',
+      });
+      return;
+    }
     setStep('saving');
     try {
       const createdBy =
@@ -260,7 +271,7 @@ export default function NewInspection() {
         numeroVistoria: numero,
         vistoriador: user?.nome || '',
         fotos,
-        statusSync: 'pendente',
+        statusSync: 'pendente_sync',
         createdAt: new Date(),
         updatedAt: nowMs,
         localUuid,
@@ -277,10 +288,24 @@ export default function NewInspection() {
       await processQueue();
 
       const v = await getVistoriaById(localId);
-      const synced = v?.statusSync === 'sincronizado';
+      const st = normalizeVistoriaStatusSync(v?.statusSync);
 
-      if (synced) {
+      if (st === 'conflito_duplicidade') {
+        toast({
+          title: 'Conflito: duplicidade na nuvem',
+          description:
+            v?.syncMessage ??
+            'Já existe placa ou número de vistoria no servidor. Abra a vistoria, corrija e sincronize novamente.',
+          variant: 'destructive',
+        });
+      } else if (st === 'sincronizado') {
         toast({ title: 'Vistoria salva!', description: `Placa ${placa} registrada na nuvem.` });
+      } else if (st === 'erro_sync') {
+        toast({
+          title: 'Erro ao sincronizar',
+          description: v?.syncMessage ?? 'Verifique conexão e tente novamente pelo painel.',
+          variant: 'destructive',
+        });
       } else {
         toast({
           title: 'Vistoria salva localmente',

@@ -46,7 +46,7 @@ const App = () => (
         <Routes>
           <Route path="/auth" element={<AuthPage />} />
           <Route path="/" element={<ProtectedRoute><Home /></ProtectedRoute>} />
-          <Route path="/leiloes" element={<ProtectedRoute><LeiloesPage /></ProtectedRoute>} />
+          <Route path="/leiloes" element={<AdminRoute><LeiloesPage /></AdminRoute>} />
           <Route path="/usuarios" element={<AdminRoute><UsuariosPage /></AdminRoute>} />
           <Route path="/dashboard/:leilaoId" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="/vistoria/:leilaoId" element={<ProtectedRoute><NewInspection /></ProtectedRoute>} />

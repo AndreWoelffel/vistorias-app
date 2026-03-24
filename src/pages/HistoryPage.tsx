@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useMemo, useEffect } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Search, Filter, Download, Loader2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -7,11 +7,31 @@ import { AppHeader } from '@/components/AppHeader';
 import { SyncBadge } from '@/components/SyncBadge';
 import { useVistorias } from '@/hooks/useVistorias';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
+import { normalizeVistoriaStatusSync, type Vistoria } from '@/lib/db';
 import * as XLSX from 'xlsx';
+
+function statusLabelForExport(v: Vistoria): string {
+  const n = normalizeVistoriaStatusSync(v.statusSync);
+  const base =
+    n === 'sincronizado'
+      ? 'Sincronizado'
+      : n === 'erro_sync'
+        ? 'Erro de sincronização'
+        : n === 'conflito_duplicidade'
+          ? 'Conflito (duplicidade)'
+          : n === 'rascunho'
+            ? 'Rascunho'
+            : 'Pendente de sincronização';
+  if (v.fotoUploadFailed && n === 'sincronizado') return `${base} · falha no envio da foto`;
+  if (v.fotoUploadFailed) return `${base} · foto`;
+  return base;
+}
 
 export default function HistoryPage() {
   const { leilaoId: id, ready } = useRequireValidLeilao();
   const navigate = useNavigate();
+  const location = useLocation();
+  const focusVistoriaId = (location.state as { focusVistoriaId?: number } | null)?.focusVistoriaId;
   const { vistorias, loading } = useVistorias(ready ? id : null);
   const [search, setSearch] = useState('');
   const [todayOnly, setTodayOnly] = useState(false);
@@ -32,6 +52,14 @@ export default function HistoryPage() {
     return result;
   }, [vistorias, search, todayOnly]);
 
+  useEffect(() => {
+    if (focusVistoriaId == null) return;
+    const t = window.setTimeout(() => {
+      document.getElementById(`vistoria-${focusVistoriaId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [focusVistoriaId, filtered]);
+
   const exportExcel = () => {
     setExporting(true);
     try {
@@ -43,7 +71,7 @@ export default function HistoryPage() {
         Placa: v.placa,
         'Nº Vistoria': v.numeroVistoria,
         Fotos: v.fotos?.length || 0,
-        Status: v.statusSync === 'sincronizado' ? 'Sincronizado' : 'Pendente',
+        Status: statusLabelForExport(v),
       }));
       const ws = XLSX.utils.json_to_sheet(data);
       // Auto-size columns
@@ -122,6 +150,7 @@ export default function HistoryPage() {
             {(filtered ?? []).map((v) => (
               <button
                 key={v.id}
+                id={v.id != null ? `vistoria-${v.id}` : undefined}
                 onClick={() => navigate(`/editar/${v.id}`)}
                 className="w-full text-left py-1.5 px-2 flex items-center gap-2 active:bg-secondary/50 transition-colors"
               >
@@ -145,7 +174,7 @@ export default function HistoryPage() {
                     )}
                   </div>
                 </div>
-                <SyncBadge status={v.statusSync} />
+                <SyncBadge status={v.statusSync} fotoUploadFailed={v.fotoUploadFailed} />
               </button>
             ))}
           </div>

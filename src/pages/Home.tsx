@@ -1,12 +1,11 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ClipboardCheck, ChevronDown, LogOut, Gavel, Users, Wifi, WifiOff } from 'lucide-react';
-import { SyncStatusIndicator } from '@/components/SyncStatusIndicator';
+import { ClipboardCheck, ChevronDown, LogOut, Gavel, Users } from 'lucide-react';
+import { OperationalStatusStrip } from '@/components/OperationalStatusStrip';
 import { PwaStatusBadge } from '@/components/PwaStatusBadge';
 import { Button } from '@/components/ui/button';
 import { useLeiloes } from '@/hooks/useVistorias';
 import { useAuth } from '@/hooks/useAuth';
-import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { useSyncStatus } from '@/hooks/useSyncStatus';
 
@@ -20,7 +19,6 @@ export default function Home() {
       (l.id as number) > 0,
   );
   const { user, logout } = useAuth();
-  const { currentUser, loading: loadingCurrentUser } = useCurrentUser();
   const online = useOnlineStatus();
   const { pendingCount, failedCount, syncing } = useSyncStatus();
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -55,38 +53,14 @@ export default function Home() {
           <p className="text-sm text-muted-foreground text-center">
             Olá, <span className="font-bold text-foreground">{user.nome}</span>
           </p>
-          <p className="text-[10px] text-muted-foreground">
-            Usuário atual:{" "}
-            {loadingCurrentUser ? (
-              "…"
-            ) : currentUser ? (
-              <>
-                <span className="font-semibold text-foreground">{currentUser.nome}</span> ({currentUser.role})
-              </>
-            ) : (
-              "—"
-            )}
-          </p>
-          <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
-            <span className="inline-flex items-center gap-1">
-              {online ? (
-                <Wifi className="h-3.5 w-3.5 text-emerald-500" />
-              ) : (
-                <WifiOff className="h-3.5 w-3.5 text-destructive" />
-              )}
-              {online ? "Online" : "Offline"}
-            </span>
-            <SyncStatusIndicator
+          <div className="flex w-full flex-col items-center gap-2 pt-1">
+            <OperationalStatusStrip
               online={online}
               syncing={syncing}
               pendingCount={pendingCount}
               failedCount={failedCount}
-              showCounts
-              className="w-full justify-center"
             />
-            <div className="flex w-full justify-center pt-1">
-              <PwaStatusBadge />
-            </div>
+            <PwaStatusBadge />
           </div>
         </div>
 
@@ -108,7 +82,9 @@ export default function Home() {
           </div>
           {!loadingLeiloes && safeLeiloes.length === 0 && (
             <p className="text-xs text-amber-600/90 dark:text-amber-400/90 text-center">
-              Nenhum leilão cadastrado. Use &quot;Gerenciar Leilões&quot; para criar antes de iniciar.
+              {user?.role === "admin"
+                ? 'Nenhum leilão cadastrado. Use "Gerenciar Leilões" para criar antes de iniciar.'
+                : "Nenhum leilão disponível. Peça a um administrador para cadastrar leilões."}
             </p>
           )}
         </div>
@@ -121,26 +97,27 @@ export default function Home() {
           Iniciar Dia
         </Button>
 
-        <Button
-          type="button"
-          variant="secondary"
-          className="w-full h-12 gap-2 font-semibold rounded-xl"
-          onClick={() => navigate('/leiloes')}
-        >
-          <Gavel className="h-5 w-5" />
-          Gerenciar Leilões
-        </Button>
-
-        {user?.role === 'admin' && (
-          <Button
-            type="button"
-            variant="outline"
-            className="w-full h-12 gap-2 font-semibold rounded-xl"
-            onClick={() => navigate("/usuarios")}
-          >
-            <Users className="h-5 w-5" />
-            Usuários
-          </Button>
+        {user?.role === "admin" && (
+          <>
+            <Button
+              type="button"
+              variant="secondary"
+              className="w-full h-12 gap-2 font-semibold rounded-xl"
+              onClick={() => navigate("/leiloes")}
+            >
+              <Gavel className="h-5 w-5" />
+              Gerenciar Leilões
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full h-12 gap-2 font-semibold rounded-xl"
+              onClick={() => navigate("/usuarios")}
+            >
+              <Users className="h-5 w-5" />
+              Usuários
+            </Button>
+          </>
         )}
 
         <button
