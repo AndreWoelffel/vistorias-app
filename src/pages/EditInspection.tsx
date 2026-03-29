@@ -6,13 +6,7 @@ import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { getVistoriaById, updateVistoria, deleteVistoria } from '@/hooks/useVistorias';
-import {
-  addToQueue,
-  removeVistoriaCreateFromQueue,
-  removeVistoriaQueueItems,
-  removeVistoriaUpdateFromQueue,
-  normalizeVistoriaStatusSync,
-} from '@/lib/db';
+import { addToQueue, removeVistoriaQueueItems, normalizeVistoriaStatusSync } from '@/lib/db';
 import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
 import { compressImage } from '@/lib/imageUtils';
 import { toast } from '@/hooks/use-toast';
@@ -91,8 +85,7 @@ export default function EditInspection() {
           duplicateType: dupLocal.type,
           duplicateInfo: dupLocal.info,
         });
-        await removeVistoriaUpdateFromQueue(vistoriaId);
-        await removeVistoriaCreateFromQueue(vistoriaId);
+        await removeVistoriaQueueItems(vistoriaId);
         toast({
           title: 'Salva no aparelho',
           description: duplicateUserMessage(dupLocal.type),
@@ -120,8 +113,7 @@ export default function EditInspection() {
           : {}),
       });
 
-      await removeVistoriaUpdateFromQueue(vistoriaId);
-      await removeVistoriaCreateFromQueue(vistoriaId);
+      await removeVistoriaQueueItems(vistoriaId);
 
       const fresh = await getVistoriaById(vistoriaId);
       const fn = normalizeVistoriaStatusSync(fresh?.statusSync);
@@ -144,7 +136,36 @@ export default function EditInspection() {
         await processQueue();
       }
 
-      toast({ title: 'Alterações salvas', description: 'Envio em segundo plano quando houver internet.' });
+      const after = await getVistoriaById(vistoriaId);
+      const st = normalizeVistoriaStatusSync(after?.statusSync);
+      if (st === 'sincronizado') {
+        toast({
+          title: 'Vistoria sincronizada',
+          description: 'Alterações já estão no servidor.',
+        });
+      } else if (st === 'pendente_sync') {
+        toast({
+          title: 'Salva no aparelho',
+          description: 'Pendente de envio quando houver internet.',
+        });
+      } else if (st === 'erro_sync') {
+        toast({
+          title: 'Erro ao enviar',
+          description: after?.syncMessage ?? 'Sem internet ou falha no envio. Tente de novo.',
+          variant: 'destructive',
+        });
+      } else if (st === 'aguardando_ajuste' || st === 'conflito_duplicidade') {
+        toast({
+          title: 'Ajuste necessário',
+          description: after?.syncMessage ?? 'Corrija placa ou número e envie de novo.',
+          variant: 'destructive',
+        });
+      } else {
+        toast({
+          title: 'Alterações salvas',
+          description: 'Envio em segundo plano quando houver internet.',
+        });
+      }
       navigate(-1);
     } catch {
       toast({

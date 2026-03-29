@@ -17,6 +17,7 @@ import {
 } from '@/lib/db';
 import { getCreatedBySnapshot } from '@/services/currentUserService';
 import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict';
+import { mergeVistoriasFromCloudRows } from '@/services/vistoriaCloudMerge';
 
 function isUniqueViolation(error: { code?: string; message?: string } | null | undefined): boolean {
   return error?.code === '23505';
@@ -83,6 +84,36 @@ async function ensureLeilaoSupabaseId(localLeilaoId: number): Promise<number | n
     }
   }
   return sid;
+}
+
+/**
+ * Busca todas as vistorias do leilão na nuvem e mescla no IndexedDB (Histórico / lista oficial).
+ * Sem `supabaseId` no leilão local, não há consulta — use só o cache local.
+ */
+export async function fetchAndMergeVistoriasFromCloudForLeilao(
+  localLeilaoId: number,
+): Promise<{ ok: boolean; rowCount: number }> {
+  const leilao = await getLeilaoById(localLeilaoId);
+  if (!leilao) return { ok: false, rowCount: 0 };
+  const fk = leilao.supabaseId;
+  if (fk == null) return { ok: false, rowCount: 0 };
+
+  const { data, error } = await supabase
+    .from('vistorias')
+    .select('*')
+    .eq('leilao', fk)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    if (import.meta.env.DEV) {
+      console.warn('[Supabase] fetch vistorias do leilão:', error.message);
+    }
+    return { ok: false, rowCount: 0 };
+  }
+
+  const rows = (data ?? []) as Record<string, unknown>[];
+  await mergeVistoriasFromCloudRows(localLeilaoId, rows);
+  return { ok: true, rowCount: rows.length };
 }
 
 /** Bucket público no Supabase Storage */

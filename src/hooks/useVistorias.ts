@@ -205,16 +205,42 @@ export function useVistorias(leilaoId: number | null) {
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
-    if (!leilaoId) return;
+    if (!leilaoId) {
+      setVistorias([]);
+      setLoading(false);
+      return;
+    }
     if (!opts?.silent) setLoading(true);
     try {
+      const online = typeof navigator === 'undefined' || navigator.onLine;
+      if (online) {
+        const { fetchAndMergeVistoriasFromCloudForLeilao } = await import(
+          '@/services/inspectionService'
+        );
+        const merged = await fetchAndMergeVistoriasFromCloudForLeilao(leilaoId);
+        if (!merged.ok && import.meta.env.DEV) {
+          console.warn(
+            'Vistorias: nuvem indisponível ou leilão sem id no servidor — usando IndexedDB',
+          );
+        }
+      }
+
       const data = await getVistoriasByLeilao(leilaoId);
       const safe = Array.isArray(data) ? data : [];
       if (import.meta.env.DEV) console.log('DEBUG lista vistorias:', safe);
       setVistorias(safe);
-    } catch {
-      if (import.meta.env.DEV) console.log('DEBUG lista vistorias:', []);
-      setVistorias([]);
+    } catch (e) {
+      if (import.meta.env.DEV) {
+        console.warn('Vistorias: erro ao carregar, tentando só IndexedDB', e);
+      }
+      try {
+        const data = await getVistoriasByLeilao(leilaoId);
+        const safe = Array.isArray(data) ? data : [];
+        setVistorias(safe);
+      } catch {
+        if (import.meta.env.DEV) console.log('DEBUG lista vistorias:', []);
+        setVistorias([]);
+      }
     } finally {
       if (!opts?.silent) setLoading(false);
     }

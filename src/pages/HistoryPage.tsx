@@ -107,6 +107,10 @@ export default function HistoryPage() {
       <AppHeader title="Histórico" showBack />
 
       <div className="space-y-3 px-4 pt-3 pb-2">
+        <p className="text-[11px] leading-snug text-muted-foreground px-0.5">
+          Vistorias deste leilão: atualizadas do servidor quando há internet; sem rede, mostramos o que está
+          salvo neste aparelho (incluindo alterações pendentes).
+        </p>
         <div className="relative">
           <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
           <Input
