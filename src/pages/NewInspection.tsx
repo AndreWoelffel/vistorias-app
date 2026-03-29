@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createWorker, type Worker } from 'tesseract.js';
-import { Check, Camera, Hash, ImagePlus, Loader2, ArrowLeft, X, AlertTriangle } from 'lucide-react';
+import { Check, Camera, Hash, ImagePlus, Loader2, ArrowLeft, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
@@ -9,16 +9,14 @@ import { CameraCapture } from '@/components/CameraCapture';
 import { StickerCameraCapture } from '@/components/StickerCameraCapture';
 import { addVistoria, updateVistoria } from '@/hooks/useVistorias';
 import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync } from '@/lib/db';
-import {
-  findLocalDuplicateVistoria,
-  SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
-} from '@/services/inspectionService';
+import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
 import { ocrWithVoting, compressImage, detectOQAmbiguity, preloadAlprModels, detectStickerBox, extractAndPrepareSticker } from '@/lib/imageUtils';
 import { readStickerNumber } from '@/services/ocrService';
 import { useAuth } from '@/hooks/useAuth';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
 import { toast } from '@/hooks/use-toast';
+import { fieldToasts } from '@/lib/uxCopy';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -102,15 +100,11 @@ export default function NewInspection() {
       // Fallback limpo: não preencher com texto inválido; limpa o campo
       if (type === 'placa' && (text === '' || confidence < 30)) {
         setPlaca('');
-        toast({
-          title: 'Placa não detectada',
-          description: 'Nenhuma placa detectada pelo modelo YOLO. Tente outra foto ou digite manualmente.',
-          variant: 'destructive',
-        });
+        toast({ ...fieldToasts.placaNaoLeu, variant: 'destructive' });
         return;
       }
       if (type === 'numero' && confidence < 10) {
-        toast({ title: 'Leitura insuficiente', description: 'Aproxime mais a câmera ou ajuste o foco.', variant: 'destructive' });
+        toast({ ...fieldToasts.leituraFracaNumero, variant: 'destructive' });
         return;
       }
 
@@ -129,7 +123,7 @@ export default function NewInspection() {
     } catch (err) {
       console.error('OCR error:', err);
       if (type === 'placa') setPlaca('');
-      toast({ title: 'Erro no OCR', description: 'Insira manualmente.', variant: 'destructive' });
+      toast({ ...fieldToasts.ocrFalhou, variant: 'destructive' });
     } finally {
       setOcrLoading(false);
     }
@@ -157,7 +151,7 @@ export default function NewInspection() {
 
       if (results.length === 0) {
         if (type === 'placa') setPlaca('');
-        toast({ title: 'Erro no ALPR', description: 'Nenhum frame processado. Insira manualmente.', variant: 'destructive' });
+        toast({ ...fieldToasts.multiFrameFalhou, variant: 'destructive' });
         return;
       }
 
@@ -179,15 +173,11 @@ export default function NewInspection() {
       // Fallback limpo para placa: limpa o campo e toast
       if (type === 'placa' && (text === '' || best.confidence < 30)) {
         setPlaca('');
-        toast({
-          title: 'Placa não detectada',
-          description: 'Nenhuma placa detectada pelo modelo YOLO. Tente outra foto ou digite manualmente.',
-          variant: 'destructive',
-        });
+        toast({ ...fieldToasts.placaNaoLeu, variant: 'destructive' });
         return;
       }
       if (type === 'numero' && best.confidence < 10) {
-        toast({ title: 'Leitura insuficiente', description: 'Aproxime mais a câmera ou ajuste o foco.', variant: 'destructive' });
+        toast({ ...fieldToasts.leituraFracaNumero, variant: 'destructive' });
         return;
       }
 
@@ -258,15 +248,18 @@ export default function NewInspection() {
           : `vis-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
       const nowMs = Date.now();
-      const dupOther = await findLocalDuplicateVistoria(id, placa.toUpperCase(), numero);
+      const dupLocal = await analyzeLocalDuplicateVistoria(id, placa.toUpperCase(), numero);
+      const isDup = dupLocal.duplicate;
       const localId = await addVistoria({
         leilaoId: id,
         placa: placa.toUpperCase(),
         numeroVistoria: numero,
         vistoriador: user?.nome || '',
         fotos,
-        statusSync: dupOther ? 'aguardando_ajuste' : 'pendente_sync',
-        syncMessage: dupOther ? SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE : undefined,
+        statusSync: isDup ? 'aguardando_ajuste' : 'pendente_sync',
+        syncMessage: isDup ? duplicateUserMessage(dupLocal.type) : undefined,
+        duplicateType: isDup ? dupLocal.type : undefined,
+        duplicateInfo: isDup ? dupLocal.info : undefined,
         createdAt: new Date(),
         updatedAt: nowMs,
         localUuid,
@@ -274,7 +267,7 @@ export default function NewInspection() {
         createdByUserId,
       });
 
-      if (!dupOther) {
+      if (!isDup) {
         await addToQueue({
           type: 'create',
           entity: 'vistoria',
@@ -289,37 +282,40 @@ export default function NewInspection() {
 
       if (st === 'aguardando_ajuste') {
         toast({
-          title: 'Salva localmente',
-          description: SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+          title: 'Salva no aparelho',
+          description: v?.syncMessage ?? 'Corrija e envie de novo.',
         });
       } else if (st === 'conflito_duplicidade') {
         toast({
-          title: 'Conflito: duplicidade na nuvem',
+          title: 'Duplicado no servidor',
           description:
             v?.syncMessage ??
-            'Já existe placa ou número de vistoria no servidor. Abra a vistoria, corrija e sincronize novamente.',
+            'Já existe essa placa ou número lá. Abra o registro, corrija e envie de novo.',
           variant: 'destructive',
         });
       } else if (st === 'sincronizado') {
-        toast({ title: 'Vistoria salva!', description: `Placa ${placa} registrada na nuvem.` });
+        toast({ title: 'Pronto', description: `Placa ${placa} já está no servidor.` });
       } else if (st === 'erro_sync') {
         toast({
-          title: 'Erro ao sincronizar',
-          description: v?.syncMessage ?? 'Verifique conexão e tente novamente pelo painel.',
+          title: 'Erro ao enviar',
+          description:
+            v?.syncMessage ?? 'Sem internet ou falha no envio. Abra o painel e toque em enviar de novo.',
           variant: 'destructive',
         });
       } else {
         toast({
-          title: 'Vistoria salva localmente',
-          description:
-            'Será enviada ao Supabase automaticamente quando houver conexão (fila de sincronização).',
-          variant: 'default',
+          title: 'Salva no aparelho',
+          description: 'Enviamos automaticamente quando a internet voltar.',
         });
       }
       navigate(`/dashboard/${id}`, { replace: true });
     } catch (err) {
       console.error(err);
-      toast({ title: 'Erro ao salvar', variant: 'destructive' });
+      toast({
+        title: 'Não salvou',
+        description: 'Tente de novo. Se continuar, feche e abra o app.',
+        variant: 'destructive',
+      });
       setStep('fotos');
     }
   };
@@ -330,11 +326,7 @@ export default function NewInspection() {
     try {
       const box = await detectStickerBox(blob);
       if (!box) {
-        toast({
-          title: 'Adesivo não detectado',
-          description: 'Nenhum adesivo encontrado na imagem. Tente outra foto ou digite o número.',
-          variant: 'destructive',
-        });
+        toast({ ...fieldToasts.adesivoNaoViu, variant: 'destructive' });
         return;
       }
       const img = await createImageBitmap(blob);
@@ -352,17 +344,10 @@ export default function NewInspection() {
       });
       const text = await readStickerNumber(stickerCanvas);
       setNumero(text ?? '');
-      toast({
-        title: 'Número da vistoria lido',
-        description: text ? `Código: ${text}` : 'Confira e edite se necessário.',
-      });
+      toast({ ...fieldToasts.numeroLido });
     } catch (err) {
       console.error('Ler adesivo:', err);
-      toast({
-        title: 'Erro ao ler adesivo',
-        description: 'Tente outra imagem ou digite manualmente.',
-        variant: 'destructive',
-      });
+      toast({ ...fieldToasts.lerAdesivoErro, variant: 'destructive' });
     } finally {
       setStickerLoading(false);
     }
@@ -377,7 +362,7 @@ export default function NewInspection() {
         <AppHeader title="Nova Vistoria" showBack onBack={() => navigate('/')} />
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
-          <p className="text-sm text-muted-foreground text-center">Validando leilão...</p>
+          <p className="text-sm text-muted-foreground text-center">Carregando…</p>
         </div>
       </div>
     );
@@ -385,18 +370,18 @@ export default function NewInspection() {
 
   if (showCamera) {
     if (step === 'placa') {
-      return <CameraCapture title="📷 ALPR - Placa" overlayType="plate" multiFrame onCapture={handlePlacaCapture} onMultiCapture={handlePlacaMultiCapture} onCancel={() => setShowCamera(false)} />;
+      return <CameraCapture title="Foto da placa" overlayType="plate" multiFrame onCapture={handlePlacaCapture} onMultiCapture={handlePlacaMultiCapture} onCancel={() => setShowCamera(false)} />;
     }
     if (step === 'numero') {
       return (
         <StickerCameraCapture
-          title="📷 Adesivo da Vistoria"
+          title="Foto do adesivo"
           onCapture={(blob) => handleStickerCapture(blob)}
           onCancel={() => setShowCamera(false)}
         />
       );
     }
-    return <CameraCapture title="📷 Foto Adicional" overlayType="none" onCapture={handleFotoCapture} onCancel={() => setShowCamera(false)} />;
+    return <CameraCapture title="Outra foto" overlayType="none" onCapture={handleFotoCapture} onCancel={() => setShowCamera(false)} />;
   }
 
   const steps = [
@@ -409,10 +394,10 @@ export default function NewInspection() {
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
-      <AppHeader title="Nova Vistoria" showBack onBack={handleCancel} />
+      <AppHeader title="Nova vistoria" showBack onBack={handleCancel} />
 
       {/* Progress */}
-      <div className="flex items-center gap-1 px-4 py-3">
+      <div className="flex items-center gap-1 px-4 py-2 sm:py-3">
         {steps.map((s, i) => (
           <div key={s.key} className="flex flex-1 items-center gap-1">
             <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold transition-colors ${
@@ -429,23 +414,25 @@ export default function NewInspection() {
         ))}
       </div>
 
-      <div className="flex-1 p-4 space-y-4">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-32 pt-2 space-y-4">
         {step === 'placa' && (
           <div className="space-y-4">
-            <div className="card-glow rounded-xl bg-card p-5 space-y-4">
-              <h2 className="text-lg font-bold">Passo 1: Placa do Veículo</h2>
-              <p className="text-sm text-muted-foreground">Use a câmera ou galeria para ler a placa, ou digite manualmente.</p>
-              <Button onClick={() => setShowCamera(true)} className="w-full h-12 gap-2 font-semibold" disabled={ocrLoading}>
+            <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
+              <div>
+                <h2 className="text-lg font-bold">Placa</h2>
+                <p className="text-sm text-muted-foreground">Foto ou digitação.</p>
+              </div>
+              <Button onClick={() => setShowCamera(true)} className="w-full min-h-12 h-12 gap-2 text-base font-semibold" disabled={ocrLoading}>
                 <Camera className="h-5 w-5" />
-                Câmera ALPR (3 frames)
+                Tirar fotos da placa
               </Button>
               {ocrLoading && (
                 <div className="flex items-center justify-center gap-2 py-3 text-primary">
                   <Loader2 className="h-5 w-5 animate-spin" />
-                  <span className="text-sm font-medium">Processando ALPR multi-frame...</span>
+                  <span className="text-sm font-medium">Lendo placa…</span>
                 </div>
               )}
-              {ocrConfidence !== null && !ocrLoading && (
+              {import.meta.env.DEV && ocrConfidence !== null && !ocrLoading && (
                 <div className={`flex items-center gap-2 rounded-lg p-3 ${
                   ocrConfidence >= 80
                     ? 'bg-accent/10 border border-accent/30'
@@ -453,7 +440,7 @@ export default function NewInspection() {
                 }`}>
                   <div className="flex-1">
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-bold">Confiança ALPR</span>
+                      <span className="text-xs font-bold">Confiança (dev)</span>
                       <span className={`text-xs font-black ${ocrConfidence >= 80 ? 'text-accent' : 'text-destructive'}`}>
                         {ocrConfidence.toFixed(0)}%
                       </span>
@@ -471,8 +458,8 @@ export default function NewInspection() {
                 </div>
               )}
               {ocrConfidence !== null && ocrConfidence < 80 && !ocrLoading && (
-                <p className="text-xs text-destructive font-medium">
-                  ⚠️ Confiança baixa. Aproxime a câmera ou limpe a placa e tente novamente.
+                <p className="text-xs text-amber-800 dark:text-amber-200 font-medium">
+                  Confira a placa: se estiver errada, corrija no campo abaixo.
                 </p>
               )}
               {oqWarning && (
@@ -481,17 +468,17 @@ export default function NewInspection() {
                   <p className="text-xs text-foreground">{oqWarning}</p>
                 </div>
               )}
-              {(geoCorrections ?? []).length > 0 && (
+              {import.meta.env.DEV && (geoCorrections ?? []).length > 0 && (
                 <div className="rounded-lg bg-primary/10 border border-primary/30 p-3 space-y-1">
-                  <p className="text-xs font-bold text-primary">🧠 Correções do Classificador Geométrico:</p>
+                  <p className="text-xs font-bold text-primary">Correções (dev)</p>
                   {(geoCorrections ?? []).map((c, i) => (
                     <p key={i} className="text-xs text-muted-foreground font-mono">{c}</p>
                   ))}
                 </div>
               )}
-              {debugImage && !ocrLoading && (
+              {import.meta.env.DEV && debugImage && !ocrLoading && (
                 <div className="space-y-2">
-                  <p className="text-xs font-bold text-muted-foreground">🔍 Imagem Binarizada (Debug):</p>
+                  <p className="text-xs font-bold text-muted-foreground">Debug imagem</p>
                   <img
                     src={debugImage}
                     alt="Imagem binarizada processada pelo ALPR"
@@ -500,9 +487,9 @@ export default function NewInspection() {
                   />
                 </div>
               )}
-              {(charDebugImages ?? []).length > 0 && !ocrLoading && (
+              {import.meta.env.DEV && (charDebugImages ?? []).length > 0 && !ocrLoading && (
                 <div className="space-y-2">
-                  <p className="text-xs font-bold text-muted-foreground">🔠 Caracteres Segmentados ({(charDebugImages ?? []).length}):</p>
+                  <p className="text-xs font-bold text-muted-foreground">Caracteres (dev)</p>
                   <div className="flex gap-1 overflow-x-auto">
                     {(charDebugImages ?? []).map((img, i) => (
                       <div key={i} className="flex flex-col items-center gap-1 shrink-0">
@@ -519,80 +506,72 @@ export default function NewInspection() {
                 </div>
               )}
               <div>
-                <label className="block text-sm font-semibold text-foreground/80 mb-1">Placa (confirme ou edite)</label>
+                <label className="block text-sm font-semibold text-foreground/80 mb-1">Placa</label>
                 <Input
                   value={placa}
                   onChange={(e) => { setPlaca(e.target.value.toUpperCase().slice(0, 7)); setOqWarning(null); }}
-                  placeholder={ocrLoading ? 'Detectando...' : 'Digite ou leia a placa'}
+                  placeholder={ocrLoading ? '…' : 'Ex.: ABC1D23'}
                   maxLength={7}
-                  className="h-12 text-center text-xl font-black tracking-widest uppercase"
+                  autoCapitalize="characters"
+                  enterKeyHint="next"
+                  className="h-14 text-center text-xl font-black tracking-widest uppercase"
                 />
               </div>
-            </div>
-            <div className="flex gap-3">
-              <Button variant="secondary" onClick={handleCancel} className="flex-1 h-12 font-semibold gap-2">
-                <X className="h-5 w-5" />
-                Cancelar
-              </Button>
-              <Button onClick={() => setStep('numero')} disabled={!placa} className="flex-1 h-12 font-semibold">
-                Próximo
-              </Button>
             </div>
           </div>
         )}
 
         {step === 'numero' && (
           <div className="space-y-4">
-            <div className="card-glow rounded-xl bg-card p-5 space-y-4">
-              <h2 className="text-lg font-bold">Passo 2: Nº da Vistoria</h2>
-              <p className="text-sm text-muted-foreground">Capture o código de 5 dígitos do adesivo ou digite manualmente.</p>
+            <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
+              <div>
+                <h2 className="text-lg font-bold">Número da vistoria</h2>
+                <p className="text-sm text-muted-foreground">5 números do adesivo.</p>
+              </div>
               <Button
                 onClick={() => setShowCamera(true)}
                 disabled={stickerLoading}
-                className="w-full h-14 text-base font-bold gap-2 bg-amber-500 hover:bg-amber-600 text-amber-950"
+                variant="secondary"
+                className="w-full min-h-12 h-12 text-base font-semibold gap-2"
               >
                 {stickerLoading ? (
                   <Loader2 className="h-5 w-5 animate-spin" />
                 ) : (
-                  <span aria-hidden>📸</span>
+                  <Camera className="h-5 w-5" />
                 )}
-                Câmera / Galeria
+                Foto do adesivo
               </Button>
               {stickerLoading && (
-                <p className="text-sm text-center text-muted-foreground">Detectando adesivo e lendo número...</p>
+                <p className="text-sm text-center text-muted-foreground">Lendo número…</p>
               )}
               <div>
-                <label className="block text-sm font-semibold text-foreground/80 mb-1">Número da Vistoria (confirme ou edite)</label>
+                <label className="block text-sm font-semibold text-foreground/80 mb-1">Número (5 dígitos)</label>
                 <Input
                   value={numero}
                   onChange={(e) => setNumero(e.target.value.replace(/\D/g, '').slice(0, 5))}
-                  placeholder="12345"
+                  placeholder="00000"
                   maxLength={5}
                   inputMode="numeric"
-                  className="h-12 text-center text-xl font-black tracking-widest"
+                  pattern="[0-9]*"
+                  enterKeyHint="next"
+                  autoComplete="off"
+                  className="h-14 text-center text-2xl font-black tracking-widest tabular-nums"
                 />
               </div>
-            </div>
-            <div className="flex gap-3">
-              <Button variant="secondary" onClick={() => setStep('placa')} className="flex-1 h-12 font-semibold gap-2">
-                <ArrowLeft className="h-5 w-5" />
-                Voltar
-              </Button>
-              <Button onClick={() => setStep('fotos')} disabled={!numero} className="flex-1 h-12 font-semibold">
-                Próximo
-              </Button>
             </div>
           </div>
         )}
 
         {step === 'fotos' && (
           <div className="space-y-4">
-            <div className="card-glow rounded-xl bg-card p-5 space-y-4">
-              <h2 className="text-lg font-bold">Passo 3: Fotos Adicionais</h2>
-              <p className="text-sm text-muted-foreground">Capture fotos do veículo (frente, traseira, laterais, etc.)</p>
-              <Button variant="secondary" onClick={() => setShowCamera(true)} className="w-full h-12 gap-2 font-semibold">
+            <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
+              <div>
+                <h2 className="text-lg font-bold">Fotos do veículo</h2>
+                <p className="text-sm text-muted-foreground">Opcional: mais ângulos.</p>
+              </div>
+              <Button variant="secondary" onClick={() => setShowCamera(true)} className="w-full min-h-12 h-12 gap-2 text-base font-semibold">
                 <ImagePlus className="h-5 w-5" />
-                Adicionar Foto ({fotos.length})
+                Adicionar foto ({fotos.length})
               </Button>
               {(fotoUrls ?? []).length > 0 && (
                 <div className="grid grid-cols-3 gap-2">
@@ -603,8 +582,8 @@ export default function NewInspection() {
               )}
             </div>
 
-            <div className="card-glow rounded-xl bg-card p-4 space-y-1.5">
-              <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-wider">Resumo</h3>
+            <div className="card-glow rounded-xl bg-card p-4 space-y-1.5 text-sm">
+              <h3 className="text-xs font-semibold text-muted-foreground">Resumo</h3>
               <div className="flex justify-between text-sm">
                 <span className="text-muted-foreground">Vistoriador</span>
                 <span className="font-semibold">{user?.nome}</span>
@@ -629,40 +608,67 @@ export default function NewInspection() {
               </div>
             </div>
 
-            <div className="flex gap-3">
-              <Button variant="secondary" onClick={() => setStep('numero')} className="flex-1 h-12 font-semibold gap-2">
-                <ArrowLeft className="h-5 w-5" />
-                Voltar
-              </Button>
-              <Button onClick={handleSave} className="flex-1 h-14 text-lg font-bold gap-2">
-                <Check className="h-6 w-6" />
-                Salvar
-              </Button>
-            </div>
           </div>
         )}
 
         {step === 'saving' && (
-          <div className="flex flex-col items-center justify-center py-20 gap-4">
-            <Loader2 className="h-10 w-10 animate-spin text-primary" />
-            <p className="text-lg font-bold">Salvando...</p>
+          <div className="flex flex-col items-center justify-center py-24 gap-4">
+            <Loader2 className="h-12 w-12 animate-spin text-primary" />
+            <p className="text-base font-semibold text-foreground">Salvando…</p>
+            <p className="text-sm text-muted-foreground text-center px-6">Não feche esta tela.</p>
           </div>
         )}
       </div>
+
+      {step !== 'saving' && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-background/95 backdrop-blur-md px-4 pt-3 shadow-[0_-8px_30px_rgba(0,0,0,0.06)] dark:shadow-[0_-8px_30px_rgba(0,0,0,0.25)] pb-[max(1rem,env(safe-area-inset-bottom))]">
+          {step === 'placa' && (
+            <div className="mx-auto flex max-w-lg w-full gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={handleCancel} className="h-12 px-3 text-muted-foreground shrink-0">
+                Sair
+              </Button>
+              <Button type="button" onClick={() => setStep('numero')} disabled={!placa} className="h-12 min-h-12 flex-1 text-base font-bold rounded-xl">
+                Continuar
+              </Button>
+            </div>
+          )}
+          {step === 'numero' && (
+            <div className="mx-auto flex max-w-lg w-full gap-2">
+              <Button type="button" variant="ghost" onClick={() => setStep('placa')} className="h-12 min-h-12 px-3 shrink-0">
+                <ArrowLeft className="h-5 w-5" />
+              </Button>
+              <Button type="button" onClick={() => setStep('fotos')} disabled={!numero} className="h-12 min-h-12 flex-1 text-base font-bold rounded-xl">
+                Continuar
+              </Button>
+            </div>
+          )}
+          {step === 'fotos' && (
+            <div className="mx-auto flex max-w-lg w-full gap-2">
+              <Button type="button" variant="ghost" onClick={() => setStep('numero')} className="h-12 min-h-12 px-3 shrink-0">
+                <ArrowLeft className="h-5 w-5" />
+              </Button>
+              <Button type="button" onClick={handleSave} className="h-14 min-h-14 flex-1 gap-2 text-lg font-bold rounded-xl">
+                <Check className="h-6 w-6" />
+                Salvar vistoria
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Cancel Confirmation Dialog */}
       <AlertDialog open={showCancelDialog} onOpenChange={setShowCancelDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Cancelar Vistoria?</AlertDialogTitle>
+            <AlertDialogTitle>Sair sem salvar?</AlertDialogTitle>
             <AlertDialogDescription>
-              Todos os dados desta vistoria serão perdidos. Deseja realmente sair?
+              O que você preencheu nesta tela será perdido. Para guardar, volte e toque em Salvar vistoria.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Continuar Editando</AlertDialogCancel>
+            <AlertDialogCancel>Voltar</AlertDialogCancel>
             <AlertDialogAction onClick={confirmCancel} className="bg-destructive text-destructive-foreground">
-              Sair e Descartar
+              Sair mesmo assim
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -671,10 +677,8 @@ export default function NewInspection() {
       <Dialog open={stickerOcrDebugOpen} onOpenChange={setStickerOcrDebugOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Debug OCR — imagem binária</DialogTitle>
-            <DialogDescription>
-              Pré-visualização exata (após escala 3×, padding e binarização) enviada ao Tesseract. Ferramenta temporária de depuração.
-            </DialogDescription>
+            <DialogTitle>Imagem para leitura (teste)</DialogTitle>
+            <DialogDescription>Só aparece em modo desenvolvimento.</DialogDescription>
           </DialogHeader>
           {stickerOcrDebugUrl && (
             <img

@@ -20,6 +20,7 @@ import {
   findVistoriaIdByCloudId,
   findVistoriaIdByExternalId,
   updateVistoria,
+  removeVistoriaQueueItems,
   type Leilao,
   type Vistoria,
 } from '@/lib/db';
@@ -84,6 +85,10 @@ async function patchVistoriaFromCloudRow(localId: number, row: Record<string, un
       row.updated_at != null ? supabaseTimestampToMs(String(row.updated_at)) : undefined,
     cloudVistoriaId: row.id != null ? String(row.id) : undefined,
     localUuid: externalId || undefined,
+    syncMessage: undefined,
+    duplicateType: undefined,
+    duplicateInfo: undefined,
+    pendingCloudDelete: false,
   };
   if (localLeilaoId != null) patch.leilaoId = localLeilaoId;
 
@@ -152,7 +157,10 @@ async function applyVistoriaDelete(oldRow: Record<string, unknown>): Promise<voi
   if (localId == null && oldRow.id != null) {
     localId = await findVistoriaIdByCloudId(String(oldRow.id));
   }
-  if (localId != null) await deleteVistoria(localId);
+  if (localId != null) {
+    await deleteVistoria(localId);
+    await removeVistoriaQueueItems(localId);
+  }
 }
 
 async function handleLeiloesChange(payload: RealtimePostgresChangesPayload<Record<string, unknown>>) {

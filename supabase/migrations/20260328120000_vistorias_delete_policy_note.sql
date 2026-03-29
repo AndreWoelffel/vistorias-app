@@ -1,0 +1,15 @@
+-- Exclusão de vistorias pelo app (offline-first): syncService chama
+--   DELETE FROM public.vistorias WHERE id = <uuid>
+-- usando a mesma chave anônima/autenticada do cliente Supabase.
+--
+-- Se Row Level Security (RLS) estiver ENABLED em public.vistorias, é necessária
+-- uma policy FOR DELETE alinhada às policies de INSERT/UPDATE já usadas pelo app.
+-- Exemplo (ajuste TO anon / authenticated / roles conforme seu projeto):
+--
+--   CREATE POLICY "vistorias_delete"
+--   ON public.vistorias
+--   FOR DELETE
+--   TO anon
+--   USING (true);
+--
+-- Em produção restrinja USING (…) a linhas permitidas para o usuário atual.

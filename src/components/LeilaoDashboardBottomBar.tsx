@@ -22,16 +22,16 @@ export function LeilaoDashboardBottomBar({ leilaoId, className }: Props) {
       <div className="mx-auto flex max-w-lg gap-2 pb-2">
         <Button
           type="button"
-          className="h-12 flex-1 gap-2 rounded-xl text-base font-bold"
+          className="h-14 min-h-14 flex-1 gap-2 rounded-xl text-base font-bold"
           onClick={() => navigate(`/vistoria/${leilaoId}`)}
         >
           <Plus className="h-5 w-5 shrink-0" />
-          Nova Vistoria
+          Nova vistoria
         </Button>
         <Button
           type="button"
-          variant="secondary"
-          className="h-12 flex-1 gap-2 rounded-xl text-base font-semibold"
+          variant="outline"
+          className="h-14 min-h-14 flex-1 gap-2 rounded-xl text-base font-medium"
           onClick={() => navigate(`/historico/${leilaoId}`)}
         >
           <History className="h-5 w-5 shrink-0" />

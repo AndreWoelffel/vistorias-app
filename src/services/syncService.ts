@@ -10,6 +10,7 @@ import {
   getVistoriaById,
   updateLeilao,
   updateVistoria,
+  deleteVistoria,
   deleteVistoriasByLeilao,
   deleteLeilaoFromDb,
   setSyncQueueItemRetryPaused,
@@ -226,6 +227,14 @@ async function markVistoriaErroSyncIfPermanent(
   const vid = p.localVistoriaId;
   if (vid == null || !Number.isFinite(vid)) return;
   try {
+    if (item.type === 'delete') {
+      await updateVistoria(vid, {
+        pendingCloudDelete: false,
+        statusSync: 'erro_sync',
+        syncMessage: formatErr(err).slice(0, 240),
+      });
+      return;
+    }
     await updateVistoria(vid, {
       statusSync: 'erro_sync',
       syncMessage: formatErr(err).slice(0, 240),
@@ -406,6 +415,32 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
       return 'blocked';
     }
     return 'fail';
+  }
+
+  if (item.entity === 'vistoria' && item.type === 'delete') {
+    const payload = item.payload as { localVistoriaId?: number };
+    const vid = payload.localVistoriaId;
+    if (vid == null || !Number.isFinite(vid)) return 'done';
+    const v = await getVistoriaById(vid);
+    if (!v) return 'done';
+    if (!v.pendingCloudDelete) {
+      if (import.meta.env.DEV) {
+        console.warn('[sync] vistoria/delete: fila obsoleta (sem pendingCloudDelete); ignorando.');
+      }
+      return 'done';
+    }
+    const cloudId = v.cloudVistoriaId?.trim();
+    if (!cloudId) {
+      await deleteVistoria(vid);
+      return 'done';
+    }
+    const { error } = await supabase.from('vistorias').delete().eq('id', cloudId);
+    if (error) {
+      console.error('[sync] Erro detalhado:', error);
+      return 'fail';
+    }
+    await deleteVistoria(vid);
+    return 'done';
   }
 
   if (import.meta.env.DEV) console.warn("[sync] Item de fila não reconhecido:", item);

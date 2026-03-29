@@ -52,6 +52,15 @@ export type VistoriaStatusSync =
   /** Duplicidade local (ou a corrigir): não sincroniza até o usuário ajustar. */
   | 'aguardando_ajuste';
 
+/** Origem da duplicidade detectada (local ou após checagem na nuvem). */
+export type VistoriaDuplicateType = 'placa' | 'numero' | 'ambos';
+
+/** Valores que entraram em conflito (para exibir na UI). */
+export type VistoriaDuplicateInfo = {
+  placa?: string;
+  numeroVistoria?: string;
+};
+
 export interface Vistoria {
   id?: number;
   leilaoId: number;
@@ -75,6 +84,12 @@ export interface Vistoria {
   syncMessage?: string;
   /** Upload da foto ao Storage falhou (vistoria pode ter seguido sem URL). */
   fotoUploadFailed?: boolean;
+  /** Tipo de duplicidade quando `aguardando_ajuste` ou `conflito_duplicidade`. */
+  duplicateType?: VistoriaDuplicateType;
+  /** Valores em conflito (ex.: placa ou número repetido). */
+  duplicateInfo?: VistoriaDuplicateInfo;
+  /** Exclusão na nuvem pendente: registro oculto na listagem até o DELETE sincronizar. */
+  pendingCloudDelete?: boolean;
 }
 
 /** Normaliza legado `pendente` → `pendente_sync` para lógica e UI. */
@@ -381,6 +396,20 @@ export async function removeVistoriaCreateFromQueue(localVistoriaId: number): Pr
   await tx.done;
 }
 
+/** Remove create, update e delete na fila para o mesmo id local de vistoria. */
+export async function removeVistoriaQueueItems(localVistoriaId: number): Promise<void> {
+  const items = await getQueue();
+  const db = await getDB();
+  const tx = db.transaction('syncQueue', 'readwrite');
+  for (const item of items) {
+    if (item.id == null) continue;
+    if (item.entity !== 'vistoria') continue;
+    const p = item.payload as { localVistoriaId?: number };
+    if (p.localVistoriaId === localVistoriaId) await tx.store.delete(item.id);
+  }
+  await tx.done;
+}
+
 export async function removeQueueItemsForLeilao(leilaoLocalId: number): Promise<void> {
   const items = await getQueue();
   const toDelete: number[] = [];
@@ -427,11 +456,18 @@ export async function deleteVistoriasByLeilao(leilaoId: number): Promise<void> {
   await tx.done;
 }
 
-export async function getVistoriasByLeilao(leilaoId: number): Promise<Vistoria[]> {
+export async function getVistoriasByLeilao(
+  leilaoId: number,
+  opts?: { includePendingCloudDelete?: boolean },
+): Promise<Vistoria[]> {
   const db = await getDB();
   const all = await db.getAllFromIndex('vistorias', 'leilaoId', leilaoId);
   const list = (Array.isArray(all) ? all : []) as Vistoria[];
-  return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  const sorted = list.sort(
+    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+  );
+  if (opts?.includePendingCloudDelete) return sorted;
+  return sorted.filter((v) => !v.pendingCloudDelete);
 }
 
 export async function getVistoriaById(id: number): Promise<Vistoria | undefined> {

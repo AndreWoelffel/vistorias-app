@@ -1,10 +1,13 @@
 import {
   getAllLeiloes,
   getQueue,
+  getVistoriaById,
   getVistoriasByLeilao,
   normalizeVistoriaStatusSync,
   type SyncQueueItem,
   type Vistoria,
+  type VistoriaDuplicateInfo,
+  type VistoriaDuplicateType,
 } from "@/lib/db";
 /** Alinhado a `syncService.MAX_SYNC_RETRIES` (evita import circular). */
 const QUEUE_MAX_RETRIES = 5;
@@ -130,8 +133,8 @@ async function vistoriaBelongsToLeilaoQueueItem(item: SyncQueueItem, leilaoId: n
   const p = item.payload as { localVistoriaId?: number };
   const vid = p.localVistoriaId;
   if (vid == null) return false;
-  const list = await getVistoriasByLeilao(leilaoId);
-  return list.some((v) => v.id === vid);
+  const v = await getVistoriaById(vid);
+  return v?.leilaoId === leilaoId;
 }
 
 function isQueueItemPermanentFailure(item: SyncQueueItem): boolean {
@@ -250,6 +253,8 @@ export type AttentionListItem = {
   vistoriador?: string;
   reasons: AttentionReason[];
   syncMessage?: string;
+  duplicateType?: VistoriaDuplicateType;
+  duplicateInfo?: VistoriaDuplicateInfo;
 };
 
 function reasonPriority(r: AttentionReason): number {
@@ -295,6 +300,8 @@ export async function listAttentionItems(leilaoId: number): Promise<AttentionLis
       vistoriador: v.vistoriador,
       reasons: [...reasons],
       syncMessage: v.syncMessage,
+      duplicateType: v.duplicateType,
+      duplicateInfo: v.duplicateInfo,
     });
   }
   out.sort(

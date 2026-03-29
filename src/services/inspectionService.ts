@@ -12,11 +12,9 @@ import {
   updateLeilao,
   updateVistoria,
   type Vistoria,
+  type VistoriaDuplicateInfo,
+  type VistoriaDuplicateType,
 } from '@/lib/db';
-
-/** Mensagem padrão para `aguardando_ajuste` (duplicidade local). */
-export const SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE =
-  'Vistoria salva localmente, mas há conflito de duplicidade. Ajuste antes de sincronizar.';
 import { getCreatedBySnapshot } from '@/services/currentUserService';
 import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict';
 
@@ -98,8 +96,99 @@ function normNumVistoria(n: string): string {
   return n.trim();
 }
 
+export type LocalDuplicateAnalysis =
+  | { duplicate: false }
+  | { duplicate: true; type: VistoriaDuplicateType; info: VistoriaDuplicateInfo };
+
+export type DuplicateCheckResult =
+  | { ok: true }
+  | { ok: false; type: VistoriaDuplicateType; message: string; info: VistoriaDuplicateInfo };
+
+/** Mensagem curta para o usuário conforme o tipo de duplicidade. */
+export function duplicateUserMessage(type: VistoriaDuplicateType): string {
+  switch (type) {
+    case 'placa':
+      return 'Já existe vistoria com esta placa';
+    case 'numero':
+      return 'Já existe vistoria com este número';
+    case 'ambos':
+      return 'Já existe vistoria com esta placa e número';
+  }
+}
+
+/** Texto do badge / chips do painel. */
+export function duplicateTypeShortLabel(type: VistoriaDuplicateType): string {
+  switch (type) {
+    case 'placa':
+      return 'Duplicado (placa)';
+    case 'numero':
+      return 'Duplicado (número)';
+    case 'ambos':
+      return 'Duplicado (placa + número)';
+  }
+}
+
+/** Legenda com valores em conflito (dashboard). */
+export function duplicateValuesCaption(
+  type: VistoriaDuplicateType | undefined,
+  info: VistoriaDuplicateInfo | undefined,
+): string | null {
+  if (!type || !info) return null;
+  const parts: string[] = [];
+  if (type === 'placa' || type === 'ambos') {
+    const p = info.placa?.trim();
+    if (p) parts.push(`Placa ${p}`);
+  }
+  if (type === 'numero' || type === 'ambos') {
+    const n = info.numeroVistoria?.trim();
+    if (n) parts.push(`Nº ${n}`);
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function buildDuplicateInfo(
+  type: VistoriaDuplicateType,
+  displayPlaca: string,
+  displayNum: string,
+): VistoriaDuplicateInfo {
+  const info: VistoriaDuplicateInfo = {};
+  if (type === 'placa' || type === 'ambos') info.placa = displayPlaca;
+  if (type === 'numero' || type === 'ambos') info.numeroVistoria = displayNum;
+  return info;
+}
+
+/**
+ * Analisa duplicidade local: placa, número ou ambos (outro registro no mesmo leilão).
+ */
+export async function analyzeLocalDuplicateVistoria(
+  leilaoId: number,
+  placa: string,
+  numeroVistoria: string,
+  excludeLocalId?: number,
+): Promise<LocalDuplicateAnalysis> {
+  const list = await getVistoriasByLeilao(leilaoId);
+  const p = normPlaca(placa);
+  const n = normNumVistoria(numeroVistoria);
+  let conflictP = false;
+  let conflictN = false;
+  for (const v of list) {
+    if (excludeLocalId != null && v.id === excludeLocalId) continue;
+    if (normPlaca(v.placa) === p) conflictP = true;
+    if (normNumVistoria(v.numeroVistoria) === n) conflictN = true;
+  }
+  if (!conflictP && !conflictN) return { duplicate: false };
+  const type: VistoriaDuplicateType =
+    conflictP && conflictN ? 'ambos' : conflictP ? 'placa' : 'numero';
+  return {
+    duplicate: true,
+    type,
+    info: buildDuplicateInfo(type, p, n),
+  };
+}
+
 /**
  * Outra vistoria no mesmo leilão com mesma placa ou mesmo número (exclui o registro atual).
+ * @deprecated Preferir `analyzeLocalDuplicateVistoria` para tipo e mensagem.
  */
 export async function findLocalDuplicateVistoria(
   leilaoId: number,
@@ -120,7 +209,7 @@ export async function findLocalDuplicateVistoria(
 }
 
 /**
- * Retorna mensagem de conflito se houver duplicidade local ou na nuvem (mesmo leilão).
+ * Conflito se houver duplicidade local ou na nuvem (mesmo leilão).
  */
 export async function assertNoDuplicateVistoriaForSync(opts: {
   leilaoId: number;
@@ -128,23 +217,28 @@ export async function assertNoDuplicateVistoriaForSync(opts: {
   numeroVistoria: string;
   excludeLocalId?: number;
   excludeExternalId?: string;
-}): Promise<string | null> {
-  const localDup = await findLocalDuplicateVistoria(
+}): Promise<DuplicateCheckResult> {
+  const local = await analyzeLocalDuplicateVistoria(
     opts.leilaoId,
     opts.placa,
     opts.numeroVistoria,
     opts.excludeLocalId,
   );
-  if (localDup) {
-    return 'Já existe outra vistoria local com a mesma placa ou o mesmo número de vistoria neste leilão.';
+  if (local.duplicate) {
+    return {
+      ok: false,
+      type: local.type,
+      message: duplicateUserMessage(local.type),
+      info: local.info,
+    };
   }
 
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
-    return null;
+    return { ok: true };
   }
 
   const fk = await ensureLeilaoSupabaseId(opts.leilaoId);
-  if (fk == null) return null;
+  if (fk == null) return { ok: true };
 
   const p = normPlaca(opts.placa);
   const n = normNumVistoria(opts.numeroVistoria);
@@ -171,14 +265,24 @@ export async function assertNoDuplicateVistoriaForSync(opts: {
     rowNum &&
     String((rowNum as { external_id?: string | null }).external_id ?? '').trim() !== extEx;
 
-  if (conflictPlaca) {
-    return 'Já existe na nuvem uma vistoria com esta placa neste leilão.';
-  }
-  if (conflictNum) {
-    return 'Já existe na nuvem uma vistoria com este número neste leilão.';
-  }
-  return null;
+  if (!conflictPlaca && !conflictNum) return { ok: true };
+
+  const type: VistoriaDuplicateType =
+    conflictPlaca && conflictNum ? 'ambos' : conflictPlaca ? 'placa' : 'numero';
+  return {
+    ok: false,
+    type,
+    message: duplicateUserMessage(type),
+    info: buildDuplicateInfo(type, p, n),
+  };
 }
+
+/** Limpa metadados de duplicidade após sync bem-sucedido ou correção. */
+const clearedDuplicateFields = {
+  syncMessage: undefined as string | undefined,
+  duplicateType: undefined as VistoriaDuplicateType | undefined,
+  duplicateInfo: undefined as VistoriaDuplicateInfo | undefined,
+};
 
 type UploadFotoResult = { url: string | null; uploadFailed: boolean };
 
@@ -266,6 +370,7 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
             statusSync: 'sincronizado',
             updatedAt: serverMs || Date.now(),
             cloudVistoriaId: ex.id != null ? String(ex.id) : undefined,
+            ...clearedDuplicateFields,
           });
         }
         return true;
@@ -290,6 +395,7 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
             statusSync: 'sincronizado',
             updatedAt: serverMs,
             cloudVistoriaId: ex.id != null ? String(ex.id) : undefined,
+            ...clearedDuplicateFields,
           });
         }
         return true;
@@ -327,17 +433,19 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
       }
 
       if (data.leilaoId != null && localVid != null) {
-        const dupMsg = await assertNoDuplicateVistoriaForSync({
+        const dup = await assertNoDuplicateVistoriaForSync({
           leilaoId: data.leilaoId,
           placa: data.placa,
           numeroVistoria: data.numero_vistoria,
           excludeLocalId: localVid,
           excludeExternalId: ext,
         });
-        if (dupMsg) {
+        if (!dup.ok) {
           await updateVistoria(localVid, {
             statusSync: 'conflito_duplicidade',
-            syncMessage: dupMsg,
+            syncMessage: dup.message,
+            duplicateType: dup.type,
+            duplicateInfo: dup.info,
           });
           return false;
         }
@@ -359,24 +467,26 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
           updatedAt: newMs > 0 ? newMs : Date.now(),
           cloudVistoriaId: afterRow?.id != null ? String(afterRow.id) : ex.id != null ? String(ex.id) : undefined,
           fotoUploadFailed: false,
-          syncMessage: undefined,
+          ...clearedDuplicateFields,
         });
       }
       return true;
     }
 
     if (data.leilaoId != null && localVid != null) {
-      const dupMsg = await assertNoDuplicateVistoriaForSync({
+      const dupIns = await assertNoDuplicateVistoriaForSync({
         leilaoId: data.leilaoId,
         placa: data.placa,
         numeroVistoria: data.numero_vistoria,
         excludeLocalId: localVid,
         excludeExternalId: ext,
       });
-      if (dupMsg) {
+      if (!dupIns.ok) {
         await updateVistoria(localVid, {
           statusSync: 'conflito_duplicidade',
-          syncMessage: dupMsg,
+          syncMessage: dupIns.message,
+          duplicateType: dupIns.type,
+          duplicateInfo: dupIns.info,
         });
         return false;
       }
@@ -442,7 +552,7 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
         updatedAt: insMs > 0 ? insMs : Date.now(),
         cloudVistoriaId: insRow?.id != null ? String(insRow.id) : undefined,
         fotoUploadFailed: false,
-        syncMessage: undefined,
+        ...clearedDuplicateFields,
       });
     }
 
@@ -488,17 +598,19 @@ export async function syncInspectionFromLocal(
     await updateVistoria(localVistoriaId, { localUuid });
   }
 
-  const dupMsg = await assertNoDuplicateVistoriaForSync({
+  const dupSync = await assertNoDuplicateVistoriaForSync({
     leilaoId: v.leilaoId,
     placa: v.placa,
     numeroVistoria: v.numeroVistoria,
     excludeLocalId: localVistoriaId,
     excludeExternalId: localUuid,
   });
-  if (dupMsg) {
+  if (!dupSync.ok) {
     await updateVistoria(localVistoriaId, {
       statusSync: 'conflito_duplicidade',
-      syncMessage: dupMsg,
+      syncMessage: dupSync.message,
+      duplicateType: dupSync.type,
+      duplicateInfo: dupSync.info,
     });
     return 'duplicate';
   }
@@ -633,10 +745,12 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
     excludeLocalId: localVistoriaId,
     excludeExternalId: ext,
   });
-  if (dupUpd) {
+  if (!dupUpd.ok) {
     await updateVistoria(localVistoriaId, {
       statusSync: 'conflito_duplicidade',
-      syncMessage: dupUpd,
+      syncMessage: dupUpd.message,
+      duplicateType: dupUpd.type,
+      duplicateInfo: dupUpd.info,
     });
     return false;
   }
@@ -668,7 +782,7 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
     cloudVistoriaId:
       afterRow?.id != null ? String(afterRow.id) : ex.id != null ? String(ex.id) : undefined,
     fotoUploadFailed: false,
-    syncMessage: undefined,
+    ...clearedDuplicateFields,
   });
   return true;
 }

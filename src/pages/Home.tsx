@@ -65,7 +65,7 @@ export default function Home() {
         </div>
 
         <div className="space-y-3">
-          <label className="block text-sm font-semibold text-foreground/80">Selecione o Leilão</label>
+          <label className="block text-sm font-semibold text-foreground/80">Leilão</label>
           <div className="relative">
             <select
               value={selectedId ?? ''}
@@ -73,7 +73,7 @@ export default function Home() {
               disabled={loadingLeiloes}
               className="w-full appearance-none rounded-xl border border-border bg-card px-4 py-4 pr-10 text-base font-medium text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-60"
             >
-              <option value="">{loadingLeiloes ? 'Carregando leilões...' : 'Escolha um leilão...'}</option>
+              <option value="">{loadingLeiloes ? 'Carregando…' : 'Escolher…'}</option>
               {safeLeiloes.map((l) => (
                 <option key={l.id} value={l.id}>{l.nome}</option>
               ))}
@@ -83,8 +83,8 @@ export default function Home() {
           {!loadingLeiloes && safeLeiloes.length === 0 && (
             <p className="text-xs text-amber-600/90 dark:text-amber-400/90 text-center">
               {user?.role === "admin"
-                ? 'Nenhum leilão cadastrado. Use "Gerenciar Leilões" para criar antes de iniciar.'
-                : "Nenhum leilão disponível. Peça a um administrador para cadastrar leilões."}
+                ? "Nenhum leilão ainda. Cadastre em Gerenciar leilões."
+                : "Nenhum leilão liberado. Peça ao administrador."}
             </p>
           )}
         </div>
@@ -92,29 +92,29 @@ export default function Home() {
         <Button
           onClick={handleStart}
           disabled={!selectedId || !safeLeiloes.some((l) => l.id === selectedId)}
-          className="w-full h-14 text-lg font-bold rounded-xl disabled:opacity-40"
+          className="w-full h-14 min-h-14 text-lg font-bold rounded-xl disabled:opacity-40"
         >
-          Iniciar Dia
+          Abrir painel
         </Button>
 
         {user?.role === "admin" && (
           <>
             <Button
               type="button"
-              variant="secondary"
-              className="w-full h-12 gap-2 font-semibold rounded-xl"
+              variant="ghost"
+              className="w-full h-11 gap-2 text-sm text-muted-foreground rounded-xl"
               onClick={() => navigate("/leiloes")}
             >
-              <Gavel className="h-5 w-5" />
-              Gerenciar Leilões
+              <Gavel className="h-4 w-4" />
+              Leilões
             </Button>
             <Button
               type="button"
-              variant="outline"
-              className="w-full h-12 gap-2 font-semibold rounded-xl"
+              variant="ghost"
+              className="w-full h-11 gap-2 text-sm text-muted-foreground rounded-xl"
               onClick={() => navigate("/usuarios")}
             >
-              <Users className="h-5 w-5" />
+              <Users className="h-4 w-4" />
               Usuários
             </Button>
           </>

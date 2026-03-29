@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Save, Trash2, ImagePlus, Loader2, ArrowLeft, X } from 'lucide-react';
+import { Save, ImagePlus, Loader2, ArrowLeft, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
@@ -9,13 +9,11 @@ import { getVistoriaById, updateVistoria, deleteVistoria } from '@/hooks/useVist
 import {
   addToQueue,
   removeVistoriaCreateFromQueue,
+  removeVistoriaQueueItems,
   removeVistoriaUpdateFromQueue,
   normalizeVistoriaStatusSync,
 } from '@/lib/db';
-import {
-  findLocalDuplicateVistoria,
-  SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
-} from '@/services/inspectionService';
+import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
 import { compressImage } from '@/lib/imageUtils';
 import { toast } from '@/hooks/use-toast';
 import type { Vistoria } from '@/lib/db';
@@ -63,11 +61,15 @@ export default function EditInspection() {
 
   const handleSave = async () => {
     if (!placa || !numero) {
-      toast({ title: 'Campos obrigatórios', variant: 'destructive' });
+      toast({
+        title: 'Falta placa ou número',
+        description: 'Preencha os dois para salvar.',
+        variant: 'destructive',
+      });
       return;
     }
     if (!vistoria) return;
-    const dupOther = await findLocalDuplicateVistoria(
+    const dupLocal = await analyzeLocalDuplicateVistoria(
       vistoria.leilaoId,
       placa.toUpperCase(),
       numero,
@@ -77,7 +79,7 @@ export default function EditInspection() {
     try {
       const norm = normalizeVistoriaStatusSync(vistoria.statusSync);
 
-      if (dupOther) {
+      if (dupLocal.duplicate) {
         await updateVistoria(vistoriaId, {
           placa: placa.toUpperCase(),
           numeroVistoria: numero,
@@ -85,13 +87,15 @@ export default function EditInspection() {
           fotos,
           updatedAt: Date.now(),
           statusSync: 'aguardando_ajuste',
-          syncMessage: SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+          syncMessage: duplicateUserMessage(dupLocal.type),
+          duplicateType: dupLocal.type,
+          duplicateInfo: dupLocal.info,
         });
         await removeVistoriaUpdateFromQueue(vistoriaId);
         await removeVistoriaCreateFromQueue(vistoriaId);
         toast({
-          title: 'Salva localmente',
-          description: SYNC_MSG_DUPLICIDADE_AGUARDAR_AJUSTE,
+          title: 'Salva no aparelho',
+          description: duplicateUserMessage(dupLocal.type),
         });
         navigate(-1);
         return;
@@ -110,6 +114,8 @@ export default function EditInspection() {
           ? {
               statusSync: 'pendente_sync',
               syncMessage: undefined,
+              duplicateType: undefined,
+              duplicateInfo: undefined,
             }
           : {}),
       });
@@ -138,36 +144,100 @@ export default function EditInspection() {
         await processQueue();
       }
 
-      toast({ title: 'Vistoria atualizada!' });
+      toast({ title: 'Alterações salvas', description: 'Envio em segundo plano quando houver internet.' });
       navigate(-1);
     } catch {
-      toast({ title: 'Erro ao salvar', variant: 'destructive' });
+      toast({
+        title: 'Não salvou',
+        description: 'Tente de novo. Verifique se há espaço e internet.',
+        variant: 'destructive',
+      });
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!confirm('Excluir esta vistoria permanentemente?')) return;
+    if (!confirm('Apagar esta vistoria deste aparelho? Não dá para desfazer.')) return;
     try {
-      await deleteVistoria(vistoriaId);
-      toast({ title: 'Vistoria excluída' });
+      const v = await getVistoriaById(vistoriaId);
+      if (!v) {
+        toast({ title: 'Registro não encontrado', variant: 'destructive' });
+        navigate(-1);
+        return;
+      }
+      const cloudId = v.cloudVistoriaId?.trim();
+      const syncedToCloud = Boolean(cloudId);
+
+      if (!syncedToCloud) {
+        await removeVistoriaQueueItems(vistoriaId);
+        await deleteVistoria(vistoriaId);
+        toast({
+          title: 'Vistoria removida',
+          description: 'O registro foi apagado deste aparelho.',
+        });
+        navigate(-1);
+        return;
+      }
+
+      await removeVistoriaQueueItems(vistoriaId);
+      await updateVistoria(vistoriaId, { pendingCloudDelete: true });
+      await addToQueue({
+        type: 'delete',
+        entity: 'vistoria',
+        payload: { localVistoriaId: vistoriaId },
+      });
+      const { processQueue } = await import('@/services/syncService');
+      await processQueue();
+      const stillThere = await getVistoriaById(vistoriaId);
+      if (stillThere) {
+        toast({
+          title: 'Vistoria marcada para exclusão',
+          description: 'Será removida na nuvem ao sincronizar; já não aparece na lista.',
+        });
+      } else {
+        toast({
+          title: 'Vistoria removida',
+          description: 'Registro apagado neste aparelho e na nuvem.',
+        });
+      }
       navigate(-1);
     } catch {
-      toast({ title: 'Erro ao excluir', variant: 'destructive' });
+      toast({
+        title: 'Não removeu',
+        description: 'Tente de novo em alguns segundos.',
+        variant: 'destructive',
+      });
     }
   };
 
   if (showCamera) {
-    return <CameraCapture title="📷 Adicionar Foto" overlayType="none" onCapture={handleFotoCapture} onCancel={() => setShowCamera(false)} />;
+    return <CameraCapture title="Nova foto" overlayType="none" onCapture={handleFotoCapture} onCancel={() => setShowCamera(false)} />;
   }
 
   if (loading) {
     return (
       <div className="flex min-h-screen flex-col bg-background">
         <AppHeader title="Editar" showBack />
-        <div className="flex flex-1 items-center justify-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Carregando…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (vistoria?.pendingCloudDelete) {
+    return (
+      <div className="flex min-h-screen flex-col bg-background">
+        <AppHeader title="Editar vistoria" showBack />
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
+          <p className="text-sm text-muted-foreground">
+            Esta vistoria está marcada para exclusão e será removida na nuvem ao sincronizar.
+          </p>
+          <Button type="button" variant="outline" onClick={() => navigate(-1)}>
+            Voltar
+          </Button>
         </div>
       </div>
     );
@@ -175,39 +245,42 @@ export default function EditInspection() {
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
-      <AppHeader title="Editar Vistoria" showBack />
+      <AppHeader title="Editar vistoria" showBack />
 
-      <div className="flex-1 p-4 space-y-4">
+      <div className="min-h-0 flex-1 overflow-y-auto p-4 pb-28 space-y-4">
         <div className="card-glow rounded-xl bg-card p-4 space-y-3">
-          <div>
-            <label className="block text-xs font-semibold text-muted-foreground mb-1">Vistoriador</label>
-            <Input value={vistoriador} onChange={(e) => setVistoriadorField(e.target.value)} className="h-11" />
-          </div>
           <div>
             <label className="block text-xs font-semibold text-muted-foreground mb-1">Placa</label>
             <Input
               value={placa}
               onChange={(e) => setPlaca(e.target.value.toUpperCase().slice(0, 7))}
               maxLength={7}
-              className="h-11 text-center text-lg font-black tracking-widest uppercase"
+              enterKeyHint="next"
+              className="h-12 text-center text-lg font-black tracking-widest uppercase"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-muted-foreground mb-1">Nº Vistoria</label>
+            <label className="block text-xs font-semibold text-muted-foreground mb-1">Número (5 dígitos)</label>
             <Input
               value={numero}
               onChange={(e) => setNumero(e.target.value.replace(/\D/g, '').slice(0, 5))}
               maxLength={5}
               inputMode="numeric"
-              className="h-11 text-center text-lg font-black tracking-widest"
+              pattern="[0-9]*"
+              enterKeyHint="done"
+              className="h-12 text-center text-lg font-black tracking-widest tabular-nums"
             />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-muted-foreground mb-1">Vistoriador</label>
+            <Input value={vistoriador} onChange={(e) => setVistoriadorField(e.target.value)} className="h-12" />
           </div>
         </div>
 
         <div className="card-glow rounded-xl bg-card p-4 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-bold">Fotos ({(fotos ?? []).length})</h3>
-            <Button variant="secondary" size="sm" onClick={() => setShowCamera(true)} className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={() => setShowCamera(true)} className="gap-1.5 h-9 text-xs shrink-0">
               <ImagePlus className="h-4 w-4" />
               Adicionar
             </Button>
@@ -227,20 +300,24 @@ export default function EditInspection() {
               ))}
             </div>
           ) : (
-            <p className="text-sm text-muted-foreground text-center py-4">Nenhuma foto</p>
+            <p className="text-sm text-muted-foreground text-center py-4">Sem fotos</p>
           )}
         </div>
 
-        <div className="space-y-2 pt-2">
-          <Button onClick={handleSave} disabled={saving} className="w-full h-13 text-base font-bold gap-2">
-            {saving ? <Loader2 className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />}
-            Salvar Alterações
-          </Button>
-          <Button variant="destructive" onClick={handleDelete} className="w-full h-12 text-base font-semibold gap-2">
-            <Trash2 className="h-5 w-5" />
-            Excluir Vistoria
-          </Button>
-        </div>
+        <button
+          type="button"
+          onClick={handleDelete}
+          className="w-full py-2 text-sm text-destructive/90 underline-offset-4 hover:underline"
+        >
+          Apagar vistoria
+        </button>
+      </div>
+
+      <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-background/95 backdrop-blur-md px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <Button onClick={handleSave} disabled={saving} className="mx-auto flex h-14 min-h-14 w-full max-w-lg text-base font-bold gap-2 rounded-xl">
+          {saving ? <Loader2 className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />}
+          Salvar
+        </Button>
       </div>
     </div>
   );

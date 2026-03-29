@@ -10,9 +10,7 @@ type Props = {
   className?: string;
 };
 
-/**
- * Indicador único: Sincronizado | Pendências (n) | Erro de sincronização (n) | Offline
- */
+/** Verde = enviado · Amarelo = pendente · Vermelho = erro · Cinza = sem internet */
 export function OperationalStatusStrip({
   online,
   syncing,
@@ -31,10 +29,10 @@ export function OperationalStatusStrip({
           ? "bg-emerald-500 shadow-[0_0_6px_rgba(34,197,94,0.4)]"
           : "bg-muted-foreground/60";
 
-  let label = "Sincronizado";
-  if (!online) label = "Offline";
-  else if (variant === "error") label = "Erro de sincronização";
-  else if (variant === "pending") label = syncing ? "Sincronizando…" : "Pendências";
+  let label = "Enviado";
+  if (!online) label = "Sem internet";
+  else if (variant === "error") label = "Erro ao sincronizar";
+  else if (variant === "pending") label = syncing ? "Enviando…" : "Pendente";
 
   return (
     <div

@@ -42,6 +42,7 @@ import {
   collectSeriesNames,
   type AttentionListItem,
 } from "@/lib/dashboardAggregates";
+import { duplicateTypeShortLabel, duplicateValuesCaption } from "@/services/inspectionService";
 import { processQueue } from "@/services/syncService";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
@@ -77,7 +78,7 @@ export default function Dashboard() {
     null,
   );
   const [attention, setAttention] = useState<AttentionListItem[]>([]);
-  const [period, setPeriod] = useState<DashboardPeriod>("30d");
+  const [period, setPeriod] = useState<DashboardPeriod>("7d");
   const [chartView, setChartView] = useState<ChartView>("vistoriador");
   const [chartRows, setChartRows] = useState<Record<string, string | number>[]>([]);
   const [chartKeys, setChartKeys] = useState<string[]>([]);
@@ -154,7 +155,11 @@ export default function Dashboard() {
       setChartKeys(keys);
     } catch (e) {
       console.error(e);
-      toast({ title: "Erro ao carregar painel", variant: "destructive" });
+      toast({
+        title: "Não carregou o painel",
+        description: "Puxe para atualizar ou verifique a internet.",
+        variant: "destructive",
+      });
     } finally {
       setLoading(false);
     }
@@ -178,9 +183,13 @@ export default function Dashboard() {
     try {
       await processQueue();
       await load();
-      toast({ title: "Sincronização executada" });
+      toast({ title: "Envio tentado", description: "Confira os cards acima se algo ainda falhou." });
     } catch {
-      toast({ title: "Falha ao sincronizar", variant: "destructive" });
+      toast({
+        title: "Não foi possível enviar agora",
+        description: "Espere a internet e tente de novo.",
+        variant: "destructive",
+      });
     } finally {
       setSyncingAttention(false);
     }
@@ -189,9 +198,10 @@ export default function Dashboard() {
   if (!ready) {
     return (
       <div className="flex min-h-screen flex-col bg-background">
-        <AppHeader title="Dashboard" showBack onBack={() => navigate("/")} />
-        <div className="flex flex-1 items-center justify-center">
+        <AppHeader title="Painel" showBack onBack={() => navigate("/")} />
+        <div className="flex flex-1 flex-col items-center justify-center gap-2">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Carregando…</p>
         </div>
       </div>
     );
@@ -199,76 +209,75 @@ export default function Dashboard() {
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
-      <AppHeader title="Painel do dia" showBack onBack={() => navigate("/")} />
+      <AppHeader title="Painel" showBack onBack={() => navigate("/")} />
 
-      <div className="flex-1 space-y-6 p-4 pb-28">
+      <div className={cn("flex-1 space-y-5 p-4 pb-28", loading && counts && "opacity-70 transition-opacity")}>
         {loading && !counts ? (
           <div className="flex flex-col items-center justify-center py-16 gap-2 text-muted-foreground">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-sm">Carregando indicadores…</p>
+            <p className="text-sm">Carregando…</p>
           </div>
         ) : counts ? (
           <>
-            <section className="space-y-2">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                Resumo operacional
-              </h2>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold text-foreground">Hoje no leilão</h2>
+                {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0" aria-label="Atualizando" />}
+              </div>
+              <div className="grid grid-cols-3 gap-2">
                 <StatCard
                   icon={<CalendarDays className="h-4 w-4" />}
                   label="Hoje"
                   value={counts.today}
-                  sub="vistorias"
+                  sub="feitas"
                   accent
                 />
                 <StatCard
                   icon={<BarChart3 className="h-4 w-4" />}
-                  label="Na semana"
+                  label="7 dias"
                   value={counts.week}
-                  sub="vistorias"
+                  sub="feitas"
                 />
                 <StatCard
                   icon={<ClipboardList className="h-4 w-4" />}
                   label="Total"
                   value={counts.total}
-                  sub="vistorias"
+                  sub="no aparelho"
                 />
+              </div>
+              <div className="grid grid-cols-3 gap-2">
                 <StatCard
                   icon={<CloudOff className="h-4 w-4" />}
-                  label="Pendências (fila)"
+                  label="A enviar"
                   value={counts.pendingQueue}
-                  sub="itens"
+                  sub="na fila"
                   warn={counts.pendingQueue > 0}
                 />
                 <StatCard
                   icon={<AlertTriangle className="h-4 w-4" />}
-                  label="Com erro"
+                  label="Erro"
                   value={counts.erro}
-                  sub="vistorias"
+                  sub="corrigir"
                   danger={counts.erro > 0}
                 />
                 <StatCard
                   icon={<Copy className="h-4 w-4" />}
-                  label="Conflito / duplicidade"
+                  label="Duplicado"
                   value={counts.conflito}
-                  sub="vistorias"
+                  sub="ajustar"
                   danger={counts.conflito > 0}
                 />
               </div>
             </section>
 
-            <section className="space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                  Produção — {periodLabel}
-                </h2>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
+            <section className="space-y-2">
+              <h2 className="text-sm font-semibold text-foreground">Vistorias por dia</h2>
+              <div className="flex flex-wrap gap-1">
                 {(
                   [
-                    ["7d", "7 dias"],
-                    ["30d", "30 dias"],
-                    ["90d", "90 dias"],
+                    ["7d", "7 d"],
+                    ["30d", "30 d"],
+                    ["90d", "90 d"],
                     ["all", "Tudo"],
                   ] as const
                 ).map(([p, lab]) => (
@@ -276,19 +285,19 @@ export default function Dashboard() {
                     key={p}
                     type="button"
                     size="sm"
-                    variant={period === p ? "default" : "secondary"}
-                    className="h-8 rounded-lg text-xs"
+                    variant={period === p ? "default" : "ghost"}
+                    className="h-9 rounded-full px-3 text-xs"
                     onClick={() => setPeriod(p)}
                   >
                     {lab}
                   </Button>
                 ))}
               </div>
-              <div className="flex flex-wrap gap-1.5">
+              <div className="flex flex-wrap gap-1 border-b border-border/60 pb-2">
                 <Button
                   type="button"
                   size="sm"
-                  variant={chartView === "total" ? "default" : "outline"}
+                  variant={chartView === "total" ? "secondary" : "ghost"}
                   className="h-8 rounded-lg text-xs"
                   onClick={() => setChartView("total")}
                 >
@@ -297,16 +306,16 @@ export default function Dashboard() {
                 <Button
                   type="button"
                   size="sm"
-                  variant={chartView === "vistoriador" ? "default" : "outline"}
+                  variant={chartView === "vistoriador" ? "secondary" : "ghost"}
                   className="h-8 rounded-lg text-xs"
                   onClick={() => setChartView("vistoriador")}
                 >
-                  Por vistoriador
+                  Por pessoa
                 </Button>
                 <Button
                   type="button"
                   size="sm"
-                  variant={chartView === "leilao" ? "default" : "outline"}
+                  variant={chartView === "leilao" ? "secondary" : "ghost"}
                   className="h-8 rounded-lg text-xs"
                   onClick={() => setChartView("leilao")}
                 >
@@ -314,13 +323,11 @@ export default function Dashboard() {
                 </Button>
               </div>
 
-              <div className="card-glow overflow-x-auto rounded-xl border border-border/60 bg-card/80 p-2">
+              <div className="overflow-x-auto rounded-xl border border-border/60 bg-card/50 p-2">
                 {chartRows.length === 0 || chartKeys.length === 0 ? (
-                  <p className="py-12 text-center text-sm text-muted-foreground">
-                    Sem dados no período selecionado.
-                  </p>
+                  <p className="py-10 text-center text-sm text-muted-foreground">Sem dados neste período.</p>
                 ) : (
-                  <div style={{ minWidth: chartMinWidth, height: 280 }}>
+                  <div style={{ minWidth: chartMinWidth, height: 220 }}>
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={chartRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                         <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
@@ -351,113 +358,117 @@ export default function Dashboard() {
             </section>
 
             {periodMetrics && (
-              <section className="space-y-2">
-                <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                  Métricas ({periodLabel})
-                </h2>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <details className="group rounded-xl border border-border/50 bg-muted/10">
+                <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
+                  <span>Mais números ({periodLabel})</span>
+                  <span className="text-xs text-muted-foreground transition-transform group-open:rotate-180">▼</span>
+                </summary>
+                <div className="grid grid-cols-1 gap-2 border-t border-border/40 px-3 py-3 sm:grid-cols-2">
                   <MetricRow
-                    icon={<TrendingUp className="h-4 w-4 text-primary" />}
-                    label="Taxa de sincronização"
+                    icon={<TrendingUp className="h-4 w-4 text-emerald-600" />}
+                    label="Enviadas no período"
                     value={`${periodMetrics.taxaSync}%`}
+                    hint="Das que estão neste aparelho."
                   />
                   <MetricRow
                     icon={<User className="h-4 w-4 text-primary" />}
-                    label="Vistoriador mais ativo"
+                    label="Quem mais fez"
                     value={periodMetrics.topVistoriador}
                     hint={`${periodMetrics.topVistoriadorCount} vistorias`}
                   />
                   <MetricRow
                     icon={<Gavel className="h-4 w-4 text-primary" />}
-                    label="Leilão com mais vistorias"
+                    label="Leilão com mais registros"
                     value={periodMetrics.topLeilao}
                     hint={`${periodMetrics.topLeilaoCount} no período`}
                   />
                   <MetricRow
                     icon={<CalendarDays className="h-4 w-4 text-primary" />}
-                    label="Média diária / pico"
+                    label="Média e pico"
                     value={`${periodMetrics.mediaDiaria} / dia`}
-                    hint={`Pico: ${periodMetrics.pico} em um dia`}
+                    hint={`Pico num dia: ${periodMetrics.pico}`}
                   />
                 </div>
-              </section>
+              </details>
             )}
 
-            <section className="space-y-3">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                Atenção necessária
-              </h2>
+            <section className="space-y-2">
+              <h2 className="text-sm font-semibold text-foreground">Precisa de ação</h2>
               {attention.length === 0 ? (
-                <p className="rounded-xl border border-border/50 bg-muted/20 px-4 py-6 text-center text-sm text-muted-foreground">
-                  Nenhum item crítico. Bom trabalho.
+                <p className="rounded-xl border border-border/40 bg-muted/15 px-4 py-5 text-center text-sm text-muted-foreground">
+                  Nada pendente por aqui.
                 </p>
               ) : (
                 <ul className="space-y-2">
-                  {attention.map((item) => (
+                  {attention.map((item) => {
+                    const dupValuesLine = duplicateValuesCaption(item.duplicateType, item.duplicateInfo);
+                    return (
                     <li
                       key={item.vistoriaId}
-                      className="card-glow rounded-xl border border-border/60 bg-card p-3 space-y-2"
+                      className="rounded-2xl border border-border/60 bg-card p-4 shadow-sm"
                     >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <p className="font-black tracking-wide text-foreground">{item.placa}</p>
-                          <p className="text-xs text-muted-foreground">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="min-w-0">
+                          <p className="text-lg font-bold tracking-wide text-foreground">{item.placa}</p>
+                          <p className="text-sm text-muted-foreground">
                             #{item.numeroVistoria}
                             {item.vistoriador ? ` · ${item.vistoriador}` : ""}
                           </p>
-                          <div className="mt-1 flex flex-wrap gap-1">
+                          <div className="mt-2 flex flex-wrap gap-1">
                             {item.reasons.map((r) => (
-                              <ReasonChip key={r} reason={r} />
+                              <ReasonChip key={r} reason={r} duplicateType={item.duplicateType} />
                             ))}
                           </div>
+                          {dupValuesLine ? (
+                            <p className="mt-1.5 text-[11px] font-medium text-muted-foreground">{dupValuesLine}</p>
+                          ) : null}
                           {item.syncMessage ? (
-                            <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
-                              {item.syncMessage}
-                            </p>
+                            <p className="mt-2 text-xs leading-snug text-orange-800 dark:text-orange-200">{item.syncMessage}</p>
                           ) : null}
                         </div>
-                        <div className="flex flex-wrap gap-1.5">
+                        <div className="flex flex-wrap items-center gap-2 sm:flex-col sm:items-stretch sm:shrink-0">
                           <Button
                             type="button"
-                            size="sm"
-                            variant="secondary"
-                            className="h-8 text-xs"
-                            onClick={() =>
-                              navigate(`/historico/${id}`, {
-                                state: { focusVistoriaId: item.vistoriaId },
-                              })
-                            }
-                          >
-                            Abrir
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="default"
-                            className="h-8 text-xs"
+                            className="h-11 min-h-11 flex-1 rounded-xl text-sm font-semibold sm:min-w-[140px]"
                             onClick={() => navigate(`/editar/${item.vistoriaId}`)}
                           >
-                            Corrigir
+                            Abrir e corrigir
                           </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-8 gap-1 text-xs"
-                            disabled={syncingAttention}
-                            onClick={() => void handleTrySync()}
-                          >
-                            {syncingAttention ? (
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                            ) : (
-                              <RefreshCw className="h-3 w-3" />
-                            )}
-                            Sincronizar
-                          </Button>
+                          <div className="flex gap-1">
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-9 text-xs text-muted-foreground"
+                              onClick={() =>
+                                navigate(`/historico/${id}`, {
+                                  state: { focusVistoriaId: item.vistoriaId },
+                                })
+                              }
+                            >
+                              Ver na lista
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-9 gap-1 text-xs text-muted-foreground"
+                              disabled={syncingAttention}
+                              onClick={() => void handleTrySync()}
+                            >
+                              {syncingAttention ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <RefreshCw className="h-3 w-3" />
+                              )}
+                              Tentar enviar
+                            </Button>
+                          </div>
                         </div>
                       </div>
                     </li>
-                  ))}
+                    );
+                  })}
                 </ul>
               )}
             </section>
@@ -468,12 +479,12 @@ export default function Dashboard() {
           type="button"
           variant="ghost"
           size="sm"
-          className="w-full text-xs text-muted-foreground"
+          className="h-10 w-full text-xs text-muted-foreground"
           onClick={() => void load()}
           disabled={loading}
         >
           {loading ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-2 h-3 w-3" />}
-          Atualizar painel
+          Atualizar
         </Button>
       </div>
 
@@ -514,7 +525,7 @@ function StatCard({
       </div>
       <p
         className={cn(
-          "text-2xl font-black tabular-nums",
+          "text-xl font-black tabular-nums sm:text-2xl",
           accent && "text-primary",
           danger && "text-red-600 dark:text-red-400",
           warn && !danger && "text-amber-700 dark:text-amber-300",
@@ -542,28 +553,45 @@ function MetricRow({
     <div className="flex items-center gap-3 rounded-xl border border-border/50 bg-card/60 px-3 py-2.5">
       <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">{icon}</div>
       <div className="min-w-0 flex-1">
-        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="text-xs font-medium text-muted-foreground">{label}</p>
         <p className="truncate text-sm font-semibold text-foreground">{value}</p>
-        {hint ? <p className="text-[11px] text-muted-foreground">{hint}</p> : null}
+        {hint ? <p className="text-[11px] leading-snug text-muted-foreground">{hint}</p> : null}
       </div>
     </div>
   );
 }
 
-function ReasonChip({ reason }: { reason: AttentionListItem["reasons"][number] }) {
+function ReasonChip({
+  reason,
+  duplicateType,
+}: {
+  reason: AttentionListItem["reasons"][number];
+  duplicateType?: AttentionListItem["duplicateType"];
+}) {
+  const dupCls = "bg-orange-500/20 text-orange-900 dark:text-orange-100";
+  if (
+    (reason === "conflito_duplicidade" || reason === "aguardando_ajuste") &&
+    duplicateType
+  ) {
+    return (
+      <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", dupCls)}>
+        {duplicateTypeShortLabel(duplicateType)}
+      </span>
+    );
+  }
   const map: Record<AttentionListItem["reasons"][number], { label: string; className: string }> = {
-    erro_sync: { label: "Erro sync", className: "bg-red-500/15 text-red-700 dark:text-red-300" },
+    erro_sync: { label: "Erro ao enviar", className: "bg-red-500/15 text-red-700 dark:text-red-300" },
     conflito_duplicidade: {
-      label: "Conflito na nuvem",
-      className: "bg-orange-500/15 text-orange-800 dark:text-orange-200",
+      label: "Duplicado no servidor",
+      className: dupCls,
     },
     aguardando_ajuste: {
-      label: "Aguardando ajuste",
-      className: "bg-amber-500/20 text-amber-950 dark:text-amber-100",
+      label: "Duplicado — ajuste",
+      className: dupCls,
     },
-    foto_falhou: { label: "Foto", className: "bg-violet-500/15 text-violet-800 dark:text-violet-200" },
-    pendente_sync: { label: "Pendente", className: "bg-amber-500/15 text-amber-800 dark:text-amber-200" },
-    fila_com_falha: { label: "Fila com falha", className: "bg-red-500/10 text-red-600 dark:text-red-400" },
+    foto_falhou: { label: "Foto não foi", className: "bg-amber-400/25 text-amber-950 dark:text-amber-50" },
+    pendente_sync: { label: "A enviar", className: "bg-amber-400/30 text-amber-950 dark:text-amber-50" },
+    fila_com_falha: { label: "Envio travado", className: "bg-red-500/10 text-red-600 dark:text-red-400" },
   };
   const m = map[reason];
   return (

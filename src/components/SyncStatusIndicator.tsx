@@ -49,23 +49,23 @@ export function SyncStatusIndicator({
 
   const label =
     variant === 'error'
-      ? 'Erro na sincronização'
+      ? 'Erro ao sincronizar'
       : variant === 'pending'
         ? syncing
-          ? 'Sincronizando…'
+          ? 'Enviando…'
           : 'Pendente'
         : variant === 'synced'
-          ? 'Sincronizado'
-          : 'Offline';
+          ? 'Enviado'
+          : 'Sem internet';
 
   return (
     <div
       className={cn('inline-flex items-center gap-1.5 text-[10px] font-medium', className)}
       title={
         failedCount > 0
-          ? `${failedCount} ${failedCount === 1 ? 'item com erro' : 'itens com erro'}`
+          ? `${failedCount} com erro — abra o painel e corrija ou tente enviar de novo`
           : pendingCount > 0
-            ? `${pendingCount} ${pendingCount === 1 ? 'item pendente' : 'itens pendentes'}`
+            ? `${pendingCount} a enviar quando houver internet`
             : label
       }
     >

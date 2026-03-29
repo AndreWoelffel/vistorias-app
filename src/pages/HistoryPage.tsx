@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Search, Filter, Download, Loader2 } from 'lucide-react';
+import { Search, Calendar, Download, Loader2, ChevronRight } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { AppHeader } from '@/components/AppHeader';
@@ -9,22 +9,23 @@ import { useVistorias } from '@/hooks/useVistorias';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
 import { isVistoriaSyncBlockedByDuplicate, normalizeVistoriaStatusSync, type Vistoria } from '@/lib/db';
 import * as XLSX from 'xlsx';
+import { cn } from '@/lib/utils';
 
 function statusLabelForExport(v: Vistoria): string {
   const n = normalizeVistoriaStatusSync(v.statusSync);
   const base =
     n === 'sincronizado'
-      ? 'Sincronizado'
+      ? 'Enviado'
       : n === 'erro_sync'
-        ? 'Erro de sincronização'
+        ? 'Erro ao enviar'
         : n === 'aguardando_ajuste'
-          ? 'Aguardando ajuste (duplicidade local)'
+          ? 'Ajuste duplicado (aparelho)'
           : n === 'conflito_duplicidade'
-            ? 'Conflito (duplicidade na nuvem)'
-          : n === 'rascunho'
-            ? 'Rascunho'
-            : 'Pendente de sincronização';
-  if (v.fotoUploadFailed && n === 'sincronizado') return `${base} · falha no envio da foto`;
+            ? 'Duplicado no servidor'
+            : n === 'rascunho'
+              ? 'Rascunho'
+              : 'Pendente';
+  if (v.fotoUploadFailed && n === 'sincronizado') return `${base} · foto não enviada`;
   if (v.fotoUploadFailed) return `${base} · foto`;
   return base;
 }
@@ -57,7 +58,7 @@ export default function HistoryPage() {
   useEffect(() => {
     if (focusVistoriaId == null) return;
     const t = window.setTimeout(() => {
-      document.getElementById(`vistoria-${focusVistoriaId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+      document.getElementById(`vistoria-${focusVistoriaId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }, 300);
     return () => window.clearTimeout(t);
   }, [focusVistoriaId, filtered]);
@@ -76,9 +77,8 @@ export default function HistoryPage() {
         Status: statusLabelForExport(v),
       }));
       const ws = XLSX.utils.json_to_sheet(data);
-      // Auto-size columns
       ws['!cols'] = [
-        { wch: 18 }, { wch: 16 }, { wch: 18 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 6 }, { wch: 14 },
+        { wch: 18 }, { wch: 16 }, { wch: 18 }, { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 6 }, { wch: 18 },
       ];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Vistorias');
@@ -94,8 +94,9 @@ export default function HistoryPage() {
     return (
       <div className="flex min-h-screen flex-col bg-background">
         <AppHeader title="Histórico" showBack onBack={() => navigate('/')} />
-        <div className="flex flex-1 items-center justify-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Carregando…</p>
         </div>
       </div>
     );
@@ -105,85 +106,100 @@ export default function HistoryPage() {
     <div className="flex min-h-screen flex-col bg-background">
       <AppHeader title="Histórico" showBack />
 
-      <div className="px-3 pt-2 pb-1 space-y-1.5">
+      <div className="space-y-3 px-4 pt-3 pb-2">
         <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Buscar placa..."
-            className="h-8 pl-8 text-xs"
+            placeholder="Buscar por placa ou número"
+            className="h-12 pl-10 text-base"
+            enterKeyHint="search"
           />
         </div>
         <div className="flex items-center gap-2">
           <Button
-            variant={todayOnly ? 'default' : 'secondary'}
+            type="button"
+            variant={todayOnly ? 'default' : 'ghost'}
             size="sm"
             onClick={() => setTodayOnly(!todayOnly)}
-            className="gap-1 text-[10px] h-7 px-2"
+            className="h-10 gap-1.5 px-3 text-sm"
           >
-            <Filter className="h-3 w-3" />
-            {todayOnly ? 'Hoje' : 'Todas'}
+            <Calendar className="h-4 w-4" />
+            {todayOnly ? 'Só hoje' : 'Todas as datas'}
           </Button>
-          <span className="text-[10px] text-muted-foreground ml-1">{filtered.length} registros</span>
+          <span className="text-xs text-muted-foreground">{filtered.length} itens</span>
           <Button
-            variant="secondary"
+            type="button"
+            variant="ghost"
             size="sm"
             onClick={exportExcel}
             disabled={exporting || filtered.length === 0}
-            className="gap-1 text-[10px] h-7 px-2 ml-auto"
+            className="ml-auto h-10 gap-1.5 px-3 text-sm"
           >
-            {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-            Excel
+            {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            Planilha
           </Button>
         </div>
       </div>
 
-      <div className="flex-1 px-2 pb-2">
+      <div className="flex-1 px-4 pb-4">
         {loading ? (
-          <p className="text-center text-muted-foreground py-10 text-xs">Carregando...</p>
+          <div className="flex flex-col items-center justify-center py-16 gap-2">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <p className="text-sm text-muted-foreground">Carregando lista…</p>
+          </div>
         ) : filtered.length === 0 ? (
-          <div className="text-center py-16">
-            <p className="text-sm font-bold text-muted-foreground">Nenhuma vistoria encontrada</p>
-            <p className="text-[10px] text-muted-foreground mt-1">Realize sua primeira vistoria</p>
+          <div className="rounded-2xl border border-dashed border-border bg-muted/20 px-6 py-14 text-center">
+            <p className="text-base font-semibold text-foreground">Nada encontrado</p>
+            <p className="mt-1 text-sm text-muted-foreground">Troque o filtro ou faça uma nova vistoria.</p>
           </div>
         ) : (
-          <div className="divide-y divide-border/40">
+          <ul className="flex flex-col gap-2">
             {(filtered ?? []).map((v) => (
-              <button
-                key={v.id}
-                id={v.id != null ? `vistoria-${v.id}` : undefined}
-                onClick={() => navigate(`/editar/${v.id}`)}
-                className={
-                  isVistoriaSyncBlockedByDuplicate(v.statusSync)
-                    ? 'w-full text-left py-1.5 px-2 flex items-center gap-2 active:bg-secondary/50 transition-colors border-l-2 border-amber-500/80 bg-amber-500/5'
-                    : 'w-full text-left py-1.5 px-2 flex items-center gap-2 active:bg-secondary/50 transition-colors'
-                }
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-black tracking-wider text-foreground">{v.placa}</span>
-                    <span className="text-[10px] text-muted-foreground">#{v.numeroVistoria}</span>
-                    {v.vistoriador && (
-                      <span className="text-[10px] text-muted-foreground truncate max-w-[80px]">• {v.vistoriador}</span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                    <span className="text-[10px] text-muted-foreground">
-                      {new Date(v.createdAt).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground">{v.fotos?.length || 0}📷</span>
-                    {v.createdBy && (
-                      <span className="text-[10px] text-muted-foreground truncate max-w-[140px]">
-                        · Criado por: {v.createdBy}
+              <li key={v.id}>
+                <button
+                  type="button"
+                  id={v.id != null ? `vistoria-${v.id}` : undefined}
+                  onClick={() => navigate(`/editar/${v.id}`)}
+                  className={cn(
+                    'flex w-full min-h-[60px] items-center gap-3 rounded-2xl border px-4 py-3 text-left transition active:scale-[0.99]',
+                    'shadow-sm hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+                    isVistoriaSyncBlockedByDuplicate(v.statusSync)
+                      ? 'border-orange-400/50 bg-orange-500/10'
+                      : 'border-border bg-card',
+                  )}
+                >
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0">
+                      <span className="text-lg font-black tracking-wider text-foreground">{v.placa}</span>
+                      <span className="text-sm tabular-nums text-muted-foreground">#{v.numeroVistoria}</span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
+                      <span>
+                        {new Date(v.createdAt).toLocaleString('pt-BR', {
+                          day: '2-digit',
+                          month: '2-digit',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
                       </span>
-                    )}
+                      {v.vistoriador ? <span>· {v.vistoriador}</span> : null}
+                      <span>· {v.fotos?.length || 0} foto(s)</span>
+                    </div>
                   </div>
-                </div>
-                <SyncBadge status={v.statusSync} fotoUploadFailed={v.fotoUploadFailed} />
-              </button>
+                  <div className="flex shrink-0 flex-col items-end gap-1.5">
+                    <SyncBadge
+                      status={v.statusSync}
+                      fotoUploadFailed={v.fotoUploadFailed}
+                      duplicateType={v.duplicateType}
+                    />
+                    <ChevronRight className="h-5 w-5 text-muted-foreground" aria-hidden />
+                  </div>
+                </button>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
       </div>
     </div>
