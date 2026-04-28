@@ -9,7 +9,9 @@ import { CameraCapture } from '@/components/CameraCapture';
 import { StickerCameraCapture } from '@/components/StickerCameraCapture';
 import { addVistoria, updateVistoria } from '@/hooks/useVistorias';
 import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync } from '@/lib/db';
-import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
+import { duplicateUserMessage } from '@/services/inspectionService';
+import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
+import { generateUuid } from '@/lib/uuid';
 import { ocrWithVoting, compressImage, detectOQAmbiguity, preloadAlprModels, detectStickerBox, extractAndPrepareSticker } from '@/lib/imageUtils';
 import { readStickerNumber } from '@/services/ocrService';
 import { useAuth } from '@/hooks/useAuth';
@@ -242,30 +244,40 @@ export default function NewInspection() {
       const createdByUserId =
         currentUser?.id != null ? String(currentUser.id) : null;
 
-      const localUuid =
-        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-          ? crypto.randomUUID()
-          : `vis-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+      let localUuid: string;
+      try {
+        localUuid = generateUuid();
+      } catch {
+        toast({
+          title: 'Não foi possível gerar identificador',
+          description: 'Feche o app e tente de novo. Se persistir, reinicie o dispositivo.',
+          variant: 'destructive',
+        });
+        setStep('form');
+        return;
+      }
 
       const nowMs = Date.now();
-      const dupLocal = await analyzeLocalDuplicateVistoria(id, placa.toUpperCase(), numero);
-      const isDup = dupLocal.duplicate;
       const localId = await addVistoria({
         leilaoId: id,
         placa: placa.toUpperCase(),
         numeroVistoria: numero,
         vistoriador: user?.nome || '',
         fotos,
-        statusSync: isDup ? 'aguardando_ajuste' : 'pendente_sync',
-        syncMessage: isDup ? duplicateUserMessage(dupLocal.type) : undefined,
-        duplicateType: isDup ? dupLocal.type : undefined,
-        duplicateInfo: isDup ? dupLocal.info : undefined,
+        statusSync: 'pendente_sync',
         createdAt: new Date(),
         updatedAt: nowMs,
         localUuid,
         createdBy,
         createdByUserId,
       });
+
+      await recalculateDuplicateVistoriasForLeilao(id);
+
+      const vAfter = await getVistoriaById(localId);
+      const stAfter = normalizeVistoriaStatusSync(vAfter?.statusSync);
+      const isDup =
+        stAfter === 'aguardando_ajuste' || stAfter === 'conflito_duplicidade';
 
       if (!isDup) {
         await addToQueue({

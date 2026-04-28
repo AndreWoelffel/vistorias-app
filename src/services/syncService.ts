@@ -15,6 +15,9 @@ import {
   deleteLeilaoFromDb,
   setSyncQueueItemRetryPaused,
   normalizeVistoriaStatusSync,
+  addToQueue,
+  removeVistoriaQueueItems,
+  ensureVistoriaLocalUuidIsUuid,
   type SyncQueueItem,
 } from '@/lib/db';
 import { syncLeilaoToCloud } from '@/services/leilaoService';
@@ -406,6 +409,15 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
       if (item.id != null) await setSyncQueueItemRetryPaused(item.id, true);
       return 'blocked';
     }
+    if (import.meta.env.DEV) {
+      console.debug('[syncService] vistoria/update item', {
+        queueItemId: item.id,
+        localVistoriaId: vid,
+        cloudVistoriaId: v0?.cloudVistoriaId,
+        statusSync: v0?.statusSync,
+        payload,
+      });
+    }
     const ok = await syncVistoriaUpdateToCloud(vid);
     if (ok) return 'done';
     const v1 = await getVistoriaById(vid);
@@ -614,4 +626,56 @@ export async function processQueue(): Promise<ProcessQueueResult> {
   }
 
   return { processed, failed, skipped: false, rounds, remainingInBackoff };
+}
+
+export type EnqueueVistoriaResyncResult =
+  | { ok: true }
+  | { ok: false; blocked: true; message: string }
+  | { ok: false; message: string };
+
+/**
+ * Recoloca vistoria na fila e processa (Histórico: retry para `erro_sync` / `pendente_sync`).
+ * Não usa para `aguardando_ajuste` / `conflito_duplicidade` (exige correção manual).
+ */
+export async function enqueueVistoriaResync(localVistoriaId: number): Promise<EnqueueVistoriaResyncResult> {
+  let v = await getVistoriaById(localVistoriaId);
+  if (!v) {
+    return { ok: false, message: 'Vistoria não encontrada.' };
+  }
+  v = await ensureVistoriaLocalUuidIsUuid(v);
+  const ns = normalizeVistoriaStatusSync(v.statusSync);
+  if (ns === 'aguardando_ajuste' || ns === 'conflito_duplicidade') {
+    return {
+      ok: false,
+      blocked: true,
+      message: 'Corrija placa ou número antes de sincronizar.',
+    };
+  }
+  if (v.pendingCloudDelete) {
+    return { ok: false, message: 'Esta vistoria está marcada para exclusão.' };
+  }
+  if (ns !== 'erro_sync' && ns !== 'pendente_sync') {
+    return { ok: false, message: 'Não há reenvio pendente para este status.' };
+  }
+
+  await removeVistoriaQueueItems(localVistoriaId);
+  await updateVistoria(localVistoriaId, {
+    statusSync: 'pendente_sync',
+    syncMessage: undefined,
+  });
+  const hasCloud = Boolean(v.cloudVistoriaId?.trim());
+  await addToQueue({
+    type: hasCloud ? 'update' : 'create',
+    entity: 'vistoria',
+    payload: { localVistoriaId },
+  });
+  if (import.meta.env.DEV) {
+    console.debug('[sync] enqueueVistoriaResync', {
+      localVistoriaId,
+      cloudVistoriaId: v.cloudVistoriaId,
+      operacaoFila: hasCloud ? 'update' : 'create',
+    });
+  }
+  await processQueue();
+  return { ok: true };
 }

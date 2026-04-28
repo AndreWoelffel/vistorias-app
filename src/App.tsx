@@ -9,6 +9,7 @@ import Home from "./pages/Home";
 import Dashboard from "./pages/Dashboard";
 import NewInspection from "./pages/NewInspection";
 import HistoryPage from "./pages/HistoryPage";
+import DuplicidadesPage from "./pages/DuplicidadesPage";
 import EditInspection from "./pages/EditInspection";
 import LeiloesPage from "./pages/LeiloesPage";
 import UsuariosPage from "./pages/UsuariosPage";
@@ -51,6 +52,7 @@ const App = () => (
           <Route path="/dashboard/:leilaoId" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="/vistoria/:leilaoId" element={<ProtectedRoute><NewInspection /></ProtectedRoute>} />
           <Route path="/historico/:leilaoId" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
+          <Route path="/duplicidades/:leilaoId" element={<ProtectedRoute><DuplicidadesPage /></ProtectedRoute>} />
           <Route path="/editar/:id" element={<ProtectedRoute><EditInspection /></ProtectedRoute>} />
           <Route path="*" element={<NotFound />} />
         </Routes>

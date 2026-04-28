@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Search, Calendar, Download, Loader2, ChevronRight } from 'lucide-react';
+import { Search, Calendar, Download, Loader2, ChevronRight, RefreshCw } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { AppHeader } from '@/components/AppHeader';
@@ -10,6 +10,8 @@ import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
 import { isVistoriaSyncBlockedByDuplicate, normalizeVistoriaStatusSync, type Vistoria } from '@/lib/db';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
+import { toast } from '@/hooks/use-toast';
+import { enqueueVistoriaResync } from '@/services/syncService';
 
 function statusLabelForExport(v: Vistoria): string {
   const n = normalizeVistoriaStatusSync(v.statusSync);
@@ -39,6 +41,7 @@ export default function HistoryPage() {
   const [search, setSearch] = useState('');
   const [todayOnly, setTodayOnly] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [resyncingId, setResyncingId] = useState<number | null>(null);
 
   const filtered = useMemo(() => {
     const list = vistorias ?? [];
@@ -62,6 +65,35 @@ export default function HistoryPage() {
     }, 300);
     return () => window.clearTimeout(t);
   }, [focusVistoriaId, filtered]);
+
+  const handleResync = async (e: React.MouseEvent, v: Vistoria) => {
+    e.stopPropagation();
+    if (v.id == null) return;
+    setResyncingId(v.id);
+    try {
+      const r = await enqueueVistoriaResync(v.id);
+      if (r.ok) {
+        toast({
+          title: 'Sincronização iniciada',
+          description: 'Tentando enviar novamente.',
+        });
+      } else if ('blocked' in r && r.blocked) {
+        toast({
+          title: 'Não é possível sincronizar agora',
+          description: r.message,
+          variant: 'destructive',
+        });
+      } else {
+        toast({
+          title: 'Não foi possível',
+          description: r.message,
+          variant: 'destructive',
+        });
+      }
+    } finally {
+      setResyncingId(null);
+    }
+  };
 
   const exportExcel = () => {
     setExporting(true);
@@ -111,15 +143,26 @@ export default function HistoryPage() {
           Vistorias deste leilão: atualizadas do servidor quando há internet; sem rede, mostramos o que está
           salvo neste aparelho (incluindo alterações pendentes).
         </p>
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Buscar por placa ou número"
-            className="h-12 pl-10 text-base"
-            enterKeyHint="search"
-          />
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="relative min-w-0 flex-1">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Buscar por placa ou número"
+              className="h-12 pl-10 text-base"
+              enterKeyHint="search"
+            />
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-10 shrink-0 rounded-lg border-muted-foreground/30 px-3 text-xs font-medium text-muted-foreground hover:bg-muted/60 sm:self-center"
+            onClick={() => navigate(`/duplicidades/${id}`)}
+          >
+            Tratar duplicidades
+          </Button>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -160,7 +203,10 @@ export default function HistoryPage() {
           </div>
         ) : (
           <ul className="flex flex-col gap-2">
-            {(filtered ?? []).map((v) => (
+            {(filtered ?? []).map((v) => {
+              const rowSt = normalizeVistoriaStatusSync(v.statusSync);
+              const showResync = rowSt === 'erro_sync' || rowSt === 'pendente_sync';
+              return (
               <li key={v.id}>
                 <button
                   type="button"
@@ -192,17 +238,37 @@ export default function HistoryPage() {
                       <span>· {v.fotos?.length || 0} foto(s)</span>
                     </div>
                   </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1.5">
-                    <SyncBadge
-                      status={v.statusSync}
-                      fotoUploadFailed={v.fotoUploadFailed}
-                      duplicateType={v.duplicateType}
-                    />
-                    <ChevronRight className="h-5 w-5 text-muted-foreground" aria-hidden />
+                  <div className="flex shrink-0 flex-col items-end gap-1.5 sm:flex-row sm:items-center">
+                    <div className="flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-2">
+                      <SyncBadge
+                        status={v.statusSync}
+                        fotoUploadFailed={v.fotoUploadFailed}
+                        duplicateType={v.duplicateType}
+                      />
+                      {showResync && v.id != null ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8 gap-1 px-2.5 text-xs font-medium"
+                          disabled={resyncingId === v.id}
+                          onClick={(e) => handleResync(e, v)}
+                        >
+                          {resyncingId === v.id ? (
+                            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                          ) : (
+                            <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                          )}
+                          Sincronizar
+                        </Button>
+                      ) : null}
+                    </div>
+                    <ChevronRight className="h-5 w-5 text-muted-foreground max-sm:hidden" aria-hidden />
                   </div>
                 </button>
               </li>
-            ))}
+            );
+            })}
           </ul>
         )}
       </div>

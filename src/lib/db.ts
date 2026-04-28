@@ -1,4 +1,7 @@
 import { openDB, type IDBPDatabase } from 'idb';
+import { generateUuid, isValidUuid } from '@/lib/uuid';
+
+export { isValidUuid } from '@/lib/uuid';
 
 export interface Leilao {
   id?: number;
@@ -61,6 +64,16 @@ export type VistoriaDuplicateInfo = {
   numeroVistoria?: string;
 };
 
+/** Outra vistoria do mesmo leilão que causa a duplicidade (referência local). */
+export type VistoriaDuplicateConflictPeer = {
+  localVistoriaId: number;
+  placa: string;
+  numeroVistoria: string;
+  createdBy?: string | null;
+  /** Data de criação local (ou vinda do merge). */
+  createdAt?: Date;
+};
+
 export interface Vistoria {
   id?: number;
   leilaoId: number;
@@ -70,7 +83,7 @@ export interface Vistoria {
   fotos: Blob[];
   statusSync: VistoriaStatusSync | 'pendente' | 'sincronizado';
   createdAt: Date;
-  /** UUID estável (gerado no app) → coluna `external_id` (text) no Supabase. */
+  /** Identificador local estável (UUID). Na criação/sync idempotente vira `external_id` no Supabase; a PK na nuvem é `cloudVistoriaId`. */
   localUuid?: string;
   /** Quem criou (nome); espelha `created_by` em public.vistorias. */
   createdBy?: string | null;
@@ -88,6 +101,10 @@ export interface Vistoria {
   duplicateType?: VistoriaDuplicateType;
   /** Valores em conflito (ex.: placa ou número repetido). */
   duplicateInfo?: VistoriaDuplicateInfo;
+  /** Outro registro que colide (quando detectável localmente). */
+  duplicateConflictWith?: VistoriaDuplicateConflictPeer;
+  /** Demais pares em conflito (recálculo em grupo). */
+  duplicateConflictWithList?: VistoriaDuplicateConflictPeer[];
   /** Exclusão na nuvem pendente: registro oculto na listagem até o DELETE sincronizar. */
   pendingCloudDelete?: boolean;
 }
@@ -116,6 +133,14 @@ export function isVistoriaSyncBlockedByDuplicate(
 ): boolean {
   const n = normalizeVistoriaStatusSync(s);
   return n === 'aguardando_ajuste' || n === 'conflito_duplicidade';
+}
+
+/** `localUuid` ou legado `externalId` no objeto local (não confundir com coluna `external_id` no Supabase). */
+export function readStableUuid(v: Vistoria): string | undefined {
+  const fromNew = v.localUuid?.trim();
+  if (fromNew) return fromNew;
+  const legacy = (v as { externalId?: string }).externalId?.trim();
+  return legacy || undefined;
 }
 
 /** Catálogo local de usuários (futuro: alinhar a Supabase Auth / profiles). */
@@ -186,6 +211,11 @@ function getDB() {
     });
   }
   return dbPromise;
+}
+
+async function getVistoriaByIdRaw(id: number): Promise<Vistoria | undefined> {
+  const db = await getDB();
+  return db.get('vistorias', id) as Promise<Vistoria | undefined>;
 }
 
 export async function getAllLeiloes(): Promise<Leilao[]> {
@@ -273,6 +303,21 @@ export async function mergeLeiloesFromCloudRows(rows: (Leilao & { id: number })[
 export async function addToQueue(
   item: Pick<SyncQueueItem, 'type' | 'entity' | 'payload'>,
 ): Promise<number> {
+  if (item.entity === 'vistoria') {
+    const p = item.payload as { localVistoriaId?: number };
+    const vid = p.localVistoriaId;
+    if (vid != null && Number.isFinite(vid)) {
+      const raw = await getVistoriaByIdRaw(vid);
+      if (!raw) {
+        throw new Error('Vistoria não encontrada para enfileirar.');
+      }
+      const v = await ensureVistoriaLocalUuidIsUuid(raw);
+      if (!isValidUuid(v.localUuid)) {
+        throw new Error('Não foi possível garantir UUID local para sincronização.');
+      }
+    }
+  }
+
   const db = await getDB();
   const row: Omit<SyncQueueItem, 'id'> = {
     type: item.type,
@@ -456,6 +501,62 @@ export async function deleteVistoriasByLeilao(leilaoId: number): Promise<void> {
   await tx.done;
 }
 
+export async function updateVistoria(id: number, data: Partial<Omit<Vistoria, 'id'>>): Promise<void> {
+  const db = await getDB();
+  const existing = await db.get('vistorias', id);
+  if (!existing) throw new Error('Vistoria não encontrada');
+  const updated = { ...existing, ...data };
+  await db.put('vistorias', updated);
+}
+
+/**
+ * Garante `localUuid` como UUID válido no IndexedDB.
+ * Na sync, o valor enviado como `external_id` no Supabase é derivado deste UUID (idempotência), sem misturar com a PK da nuvem.
+ */
+export async function ensureVistoriaLocalUuidIsUuid(vistoria: Vistoria): Promise<Vistoria> {
+  const id = vistoria.id;
+  const cur = readStableUuid(vistoria);
+
+  if (cur && isValidUuid(cur)) {
+    const t = cur.trim();
+    if (vistoria.localUuid !== t) {
+      if (id != null && Number.isFinite(id)) {
+        await updateVistoria(id, { localUuid: t });
+      }
+      return { ...vistoria, localUuid: t };
+    }
+    return { ...vistoria, localUuid: t };
+  }
+
+  if (id == null || !Number.isFinite(id)) {
+    return { ...vistoria, localUuid: generateUuid() };
+  }
+
+  const fresh = generateUuid();
+  if (import.meta.env.DEV) {
+    console.debug('[vistoria-sync] corrigindo localUuid inválido', {
+      idLocal: id,
+      valorAntigo: cur ?? '(ausente)',
+      valorNovo: fresh,
+    });
+  }
+  await updateVistoria(id, { localUuid: fresh });
+  return { ...vistoria, localUuid: fresh };
+}
+
+export async function addVistoria(data: Omit<Vistoria, 'id'>): Promise<number> {
+  const db = await getDB();
+  const id = (await db.add('vistorias', data as any)) as number;
+  const raw = await getVistoriaByIdRaw(id);
+  if (raw) await ensureVistoriaLocalUuidIsUuid(raw);
+  return id;
+}
+
+export async function deleteVistoria(id: number): Promise<void> {
+  const db = await getDB();
+  await db.delete('vistorias', id);
+}
+
 export async function getVistoriasByLeilao(
   leilaoId: number,
   opts?: { includePendingCloudDelete?: boolean },
@@ -466,13 +567,18 @@ export async function getVistoriasByLeilao(
   const sorted = list.sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
   );
-  if (opts?.includePendingCloudDelete) return sorted;
-  return sorted.filter((v) => !v.pendingCloudDelete);
+  const withUuid: Vistoria[] = [];
+  for (const row of sorted) {
+    withUuid.push(await ensureVistoriaLocalUuidIsUuid(row));
+  }
+  if (opts?.includePendingCloudDelete) return withUuid;
+  return withUuid.filter((v) => !v.pendingCloudDelete);
 }
 
 export async function getVistoriaById(id: number): Promise<Vistoria | undefined> {
-  const db = await getDB();
-  return db.get('vistorias', id) as Promise<Vistoria | undefined>;
+  const raw = await getVistoriaByIdRaw(id);
+  if (!raw) return undefined;
+  return ensureVistoriaLocalUuidIsUuid(raw);
 }
 
 export async function countVistoriasToday(leilaoId: number): Promise<number> {
@@ -485,31 +591,6 @@ export async function countVistoriasToday(leilaoId: number): Promise<number> {
 export async function countVistorias(leilaoId: number): Promise<number> {
   const all = await getVistoriasByLeilao(leilaoId);
   return all.length;
-}
-
-export async function addVistoria(data: Omit<Vistoria, 'id'>): Promise<number> {
-  const db = await getDB();
-  return db.add('vistorias', data as any) as Promise<number>;
-}
-
-export async function updateVistoria(id: number, data: Partial<Omit<Vistoria, 'id'>>): Promise<void> {
-  const db = await getDB();
-  const existing = await db.get('vistorias', id);
-  if (!existing) throw new Error('Vistoria não encontrada');
-  const updated = { ...existing, ...data };
-  await db.put('vistorias', updated);
-}
-
-export async function deleteVistoria(id: number): Promise<void> {
-  const db = await getDB();
-  await db.delete('vistorias', id);
-}
-
-function readVistoriaStableUuid(v: Vistoria): string | undefined {
-  const u = v.localUuid?.trim();
-  if (u) return u;
-  const legacy = (v as { externalId?: string }).externalId?.trim();
-  return legacy || undefined;
 }
 
 /** Id local do leilão cujo `supabaseId` (ou id numérico alinhado à nuvem) corresponde ao FK da vistoria. */
@@ -530,7 +611,7 @@ export async function findVistoriaIdByExternalId(externalId: string): Promise<nu
   const rows = await db.getAll('vistorias');
   const list = (Array.isArray(rows) ? rows : []) as Vistoria[];
   for (const v of list) {
-    const u = readVistoriaStableUuid(v);
+    const u = readStableUuid(v);
     if (u === ext && v.id != null) return v.id;
   }
   return undefined;

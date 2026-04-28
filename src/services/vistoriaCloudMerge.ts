@@ -9,18 +9,12 @@ import {
   findVistoriaIdByExternalId,
   getVistoriaById,
   normalizeVistoriaStatusSync,
+  readStableUuid,
   removeVistoriaQueueItems,
   resolveLocalLeilaoIdForCloudFk,
   updateVistoria,
   type Vistoria,
 } from '@/lib/db';
-
-function readStableUuid(v: Vistoria): string | undefined {
-  const fromNew = v.localUuid?.trim();
-  if (fromNew) return fromNew;
-  const legacy = (v as { externalId?: string }).externalId?.trim();
-  return legacy || undefined;
-}
 
 /** Não sobrescrever dados locais com pull da nuvem quando há trabalho pendente ou exclusão. */
 export function shouldPreserveLocalVistoriaFromCloudMerge(v: Vistoria): boolean {
@@ -55,6 +49,8 @@ export async function patchVistoriaFromCloudRow(localId: number, row: Record<str
     syncMessage: undefined,
     duplicateType: undefined,
     duplicateInfo: undefined,
+    duplicateConflictWith: undefined,
+    duplicateConflictWithList: undefined,
     pendingCloudDelete: false,
   };
   if (localLeilaoId != null) patch.leilaoId = localLeilaoId;
@@ -125,8 +121,14 @@ export async function applyVistoriaDelete(oldRow: Record<string, unknown>): Prom
     localId = await findVistoriaIdByCloudId(String(oldRow.id));
   }
   if (localId != null) {
+    const v = await getVistoriaById(localId);
+    const leilaoId = v?.leilaoId;
     await deleteVistoria(localId);
     await removeVistoriaQueueItems(localId);
+    if (leilaoId != null && Number.isFinite(leilaoId)) {
+      const { recalculateDuplicateVistoriasForLeilao } = await import('@/services/duplicateVistoriaRecalc');
+      await recalculateDuplicateVistoriasForLeilao(leilaoId);
+    }
   }
 }
 
@@ -174,4 +176,6 @@ export async function mergeVistoriasFromCloudRows(
   for (const row of rows) {
     await mergeCloudRowWithLocalPreservation(localLeilaoId, row);
   }
+  const { recalculateDuplicateVistoriasForLeilao } = await import('@/services/duplicateVistoriaRecalc');
+  await recalculateDuplicateVistoriasForLeilao(localLeilaoId);
 }

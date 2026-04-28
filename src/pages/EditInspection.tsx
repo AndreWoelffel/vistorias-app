@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Save, ImagePlus, Loader2, ArrowLeft, X } from 'lucide-react';
+import { Save, ImagePlus, Loader2, ArrowLeft, X, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { getVistoriaById, updateVistoria, deleteVistoria } from '@/hooks/useVistorias';
 import { addToQueue, removeVistoriaQueueItems, normalizeVistoriaStatusSync } from '@/lib/db';
-import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
+import { duplicateUserMessage } from '@/services/inspectionService';
+import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { compressImage } from '@/lib/imageUtils';
 import { toast } from '@/hooks/use-toast';
 import type { Vistoria } from '@/lib/db';
@@ -63,39 +64,25 @@ export default function EditInspection() {
       return;
     }
     if (!vistoria) return;
-    const dupLocal = await analyzeLocalDuplicateVistoria(
-      vistoria.leilaoId,
-      placa.toUpperCase(),
-      numero,
-      vistoriaId,
-    );
     setSaving(true);
     try {
       const norm = normalizeVistoriaStatusSync(vistoria.statusSync);
 
-      if (dupLocal.duplicate) {
-        await updateVistoria(vistoriaId, {
-          placa: placa.toUpperCase(),
-          numeroVistoria: numero,
-          vistoriador,
-          fotos,
-          updatedAt: Date.now(),
-          statusSync: 'aguardando_ajuste',
-          syncMessage: duplicateUserMessage(dupLocal.type),
-          duplicateType: dupLocal.type,
-          duplicateInfo: dupLocal.info,
-        });
-        await removeVistoriaQueueItems(vistoriaId);
-        toast({
-          title: 'Salva no aparelho',
-          description: duplicateUserMessage(dupLocal.type),
-        });
-        navigate(-1);
-        return;
-      }
-
       const clearingConflictOrError =
         norm === 'conflito_duplicidade' || norm === 'aguardando_ajuste' || norm === 'erro_sync';
+
+      const hasCloud = Boolean(vistoria.cloudVistoriaId?.trim());
+      const queueOp: 'create' | 'update' = hasCloud ? 'update' : 'create';
+
+      if (import.meta.env.DEV) {
+        console.debug('[EditInspection] salvar edição', {
+          localId: vistoriaId,
+          cloudVistoriaId: vistoria.cloudVistoriaId,
+          statusAntes: vistoria.statusSync,
+          operacaoFila: queueOp,
+          limpandoConflito: clearingConflictOrError,
+        });
+      }
 
       await updateVistoria(vistoriaId, {
         placa: placa.toUpperCase(),
@@ -109,17 +96,38 @@ export default function EditInspection() {
               syncMessage: undefined,
               duplicateType: undefined,
               duplicateInfo: undefined,
+              duplicateConflictWith: undefined,
+              duplicateConflictWithList: undefined,
             }
           : {}),
       });
 
+      await recalculateDuplicateVistoriasForLeilao(vistoria.leilaoId);
+
+      const afterRecalc = await getVistoriaById(vistoriaId);
+      const fn = normalizeVistoriaStatusSync(afterRecalc?.statusSync);
+
+      if (fn === 'aguardando_ajuste' || fn === 'conflito_duplicidade') {
+        await removeVistoriaQueueItems(vistoriaId);
+        toast({
+          title: 'Duplicado. Ajuste antes de sincronizar',
+          description:
+            afterRecalc?.syncMessage ??
+            (afterRecalc?.duplicateType
+              ? duplicateUserMessage(afterRecalc.duplicateType)
+              : 'Corrija placa ou número e envie de novo.'),
+        });
+        navigate(-1);
+        return;
+      }
+
       await removeVistoriaQueueItems(vistoriaId);
 
       const fresh = await getVistoriaById(vistoriaId);
-      const fn = normalizeVistoriaStatusSync(fresh?.statusSync);
-      if (fn !== 'rascunho') {
-        const hasCloud = Boolean(fresh?.cloudVistoriaId);
-        if (hasCloud) {
+      const fn2 = normalizeVistoriaStatusSync(fresh?.statusSync);
+      if (fn2 !== 'rascunho') {
+        const hasCloudAfter = Boolean(fresh?.cloudVistoriaId?.trim());
+        if (hasCloudAfter) {
           await addToQueue({
             type: 'update',
             entity: 'vistoria',
@@ -140,12 +148,12 @@ export default function EditInspection() {
       const st = normalizeVistoriaStatusSync(after?.statusSync);
       if (st === 'sincronizado') {
         toast({
-          title: 'Vistoria sincronizada',
+          title: 'Vistoria atualizada',
           description: 'Alterações já estão no servidor.',
         });
       } else if (st === 'pendente_sync') {
         toast({
-          title: 'Salva no aparelho',
+          title: 'Alterações salvas no aparelho',
           description: 'Pendente de envio quando houver internet.',
         });
       } else if (st === 'erro_sync') {
@@ -156,7 +164,7 @@ export default function EditInspection() {
         });
       } else if (st === 'aguardando_ajuste' || st === 'conflito_duplicidade') {
         toast({
-          title: 'Ajuste necessário',
+          title: 'Duplicado. Ajuste antes de sincronizar',
           description: after?.syncMessage ?? 'Corrija placa ou número e envie de novo.',
           variant: 'destructive',
         });
@@ -191,8 +199,10 @@ export default function EditInspection() {
       const syncedToCloud = Boolean(cloudId);
 
       if (!syncedToCloud) {
+        const lid = v.leilaoId;
         await removeVistoriaQueueItems(vistoriaId);
         await deleteVistoria(vistoriaId);
+        await recalculateDuplicateVistoriasForLeilao(lid);
         toast({
           title: 'Vistoria removida',
           description: 'O registro foi apagado deste aparelho.',
@@ -297,6 +307,55 @@ export default function EditInspection() {
             <Input value={vistoriador} onChange={(e) => setVistoriadorField(e.target.value)} className="h-12" />
           </div>
         </div>
+
+        {(() => {
+          const list =
+            vistoria?.duplicateConflictWithList && vistoria.duplicateConflictWithList.length > 0
+              ? vistoria.duplicateConflictWithList
+              : vistoria?.duplicateConflictWith
+                ? [vistoria.duplicateConflictWith]
+                : [];
+          if (list.length === 0) return null;
+          return (
+            <div className="rounded-xl border border-amber-500/50 bg-amber-500/15 px-4 py-3 dark:bg-amber-950/40">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-200" aria-hidden />
+                <div className="min-w-0 flex-1 space-y-3">
+                  <p className="text-xs font-bold uppercase tracking-wide text-amber-100">
+                    {list.length > 1 ? `Conflita com ${list.length} vistorias` : 'Conflita com outra vistoria'}
+                  </p>
+                  <ul className="space-y-2">
+                    {list.map((peer) => (
+                      <li key={peer.localVistoriaId} className="rounded-lg border border-amber-500/30 bg-amber-950/20 px-3 py-2">
+                        <p className="text-sm text-amber-50">
+                          Placa <span className="font-black">{peer.placa}</span> · Nº{' '}
+                          <span className="font-mono font-bold">{peer.numeroVistoria}</span>
+                        </p>
+                        {peer.createdBy ? (
+                          <p className="text-[11px] text-amber-100/90">
+                            Registro: {peer.createdBy}
+                            {peer.createdAt
+                              ? ` · ${new Date(peer.createdAt).toLocaleString('pt-BR')}`
+                              : ''}
+                          </p>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="mt-2 h-9 w-full bg-amber-950/50 text-amber-50 hover:bg-amber-950/70"
+                          onClick={() => navigate(`/editar/${peer.localVistoriaId}`)}
+                        >
+                          Abrir vistoria #{peer.localVistoriaId}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         <div className="card-glow rounded-xl bg-card p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">

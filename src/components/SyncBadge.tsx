@@ -14,15 +14,25 @@ interface SyncBadgeProps {
 export function SyncBadge({ status, fotoUploadFailed, duplicateType, className }: SyncBadgeProps) {
   const n = normalizeVistoriaStatusSync(status);
 
+  const dupBadgeClass = duplicateType
+    ? "border border-orange-400/40 bg-gradient-to-r from-orange-600/90 to-red-700/85 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm dark:from-orange-700/95 dark:to-red-900/90"
+    : "inline-flex items-center gap-1 rounded-full bg-orange-500/20 px-2.5 py-1 text-[11px] font-semibold text-orange-900 dark:text-orange-100";
+
   if (n === "aguardando_ajuste") {
     return (
       <span
         className={cn(
-          "inline-flex items-center gap-1 rounded-full bg-orange-500/20 px-2.5 py-1 text-[11px] font-semibold text-orange-900 dark:text-orange-100",
+          "inline-flex items-center gap-1 rounded-full",
+          dupBadgeClass,
           className,
         )}
       >
-        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        <AlertTriangle
+          className={cn(
+            "h-3.5 w-3.5 shrink-0",
+            duplicateType ? "text-white" : "text-orange-900 dark:text-orange-100",
+          )}
+        />
         {duplicateType ? duplicateTypeShortLabel(duplicateType) : "Ajuste antes de enviar"}
       </span>
     );
@@ -32,11 +42,17 @@ export function SyncBadge({ status, fotoUploadFailed, duplicateType, className }
     return (
       <span
         className={cn(
-          "inline-flex items-center gap-1 rounded-full bg-orange-500/20 px-2.5 py-1 text-[11px] font-semibold text-orange-900 dark:text-orange-100",
+          "inline-flex items-center gap-1 rounded-full",
+          dupBadgeClass,
           className,
         )}
       >
-        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        <AlertTriangle
+          className={cn(
+            "h-3.5 w-3.5 shrink-0",
+            duplicateType ? "text-white" : "text-orange-900 dark:text-orange-100",
+          )}
+        />
         {duplicateType ? duplicateTypeShortLabel(duplicateType) : "Duplicado. Ajuste antes de enviar"}
       </span>
     );

@@ -223,6 +223,11 @@ export function useVistorias(leilaoId: number | null) {
             'Vistorias: nuvem indisponível ou leilão sem id no servidor — usando IndexedDB',
           );
         }
+      } else {
+        const { recalculateDuplicateVistoriasForLeilao } = await import(
+          '@/services/duplicateVistoriaRecalc',
+        );
+        await recalculateDuplicateVistoriasForLeilao(leilaoId);
       }
 
       const data = await getVistoriasByLeilao(leilaoId);
@@ -234,6 +239,10 @@ export function useVistorias(leilaoId: number | null) {
         console.warn('Vistorias: erro ao carregar, tentando só IndexedDB', e);
       }
       try {
+        const { recalculateDuplicateVistoriasForLeilao } = await import(
+          '@/services/duplicateVistoriaRecalc',
+        );
+        await recalculateDuplicateVistoriasForLeilao(leilaoId);
         const data = await getVistoriasByLeilao(leilaoId);
         const safe = Array.isArray(data) ? data : [];
         setVistorias(safe);

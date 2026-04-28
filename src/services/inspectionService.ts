@@ -11,25 +11,26 @@ import {
   normalizeVistoriaStatusSync,
   updateLeilao,
   updateVistoria,
+  isValidUuid,
+  readStableUuid,
   type Vistoria,
+  type VistoriaDuplicateConflictPeer,
   type VistoriaDuplicateInfo,
   type VistoriaDuplicateType,
 } from '@/lib/db';
 import { getCreatedBySnapshot } from '@/services/currentUserService';
 import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict';
 import { mergeVistoriasFromCloudRows } from '@/services/vistoriaCloudMerge';
+import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
+
+export { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 
 function isUniqueViolation(error: { code?: string; message?: string } | null | undefined): boolean {
   return error?.code === '23505';
 }
 
-/** Registros antigos no IndexedDB podem ter `externalId` em vez de `localUuid`. */
-export function readStableUuid(v: Vistoria): string | undefined {
-  const fromNew = v.localUuid?.trim();
-  if (fromNew) return fromNew;
-  const legacy = (v as { externalId?: string }).externalId?.trim();
-  return legacy || undefined;
-}
+/** Reexport: UUID local + coluna `external_id` na nuvem (mesmo valor do `localUuid` após garantia). */
+export { isValidUuid, readStableUuid, ensureVistoriaLocalUuidIsUuid } from '@/lib/db';
 
 type VistoriaCloudRow = {
   id?: string;
@@ -129,11 +130,23 @@ function normNumVistoria(n: string): string {
 
 export type LocalDuplicateAnalysis =
   | { duplicate: false }
-  | { duplicate: true; type: VistoriaDuplicateType; info: VistoriaDuplicateInfo };
+  | {
+      duplicate: true;
+      type: VistoriaDuplicateType;
+      info: VistoriaDuplicateInfo;
+      /** Outra vistoria local que colide (quando há match). */
+      conflictWith?: VistoriaDuplicateConflictPeer;
+    };
 
 export type DuplicateCheckResult =
   | { ok: true }
-  | { ok: false; type: VistoriaDuplicateType; message: string; info: VistoriaDuplicateInfo };
+  | {
+      ok: false;
+      type: VistoriaDuplicateType;
+      message: string;
+      info: VistoriaDuplicateInfo;
+      conflictWith?: VistoriaDuplicateConflictPeer;
+    };
 
 /** Mensagem curta para o usuário conforme o tipo de duplicidade. */
 export function duplicateUserMessage(type: VistoriaDuplicateType): string {
@@ -197,7 +210,7 @@ export async function analyzeLocalDuplicateVistoria(
   numeroVistoria: string,
   excludeLocalId?: number,
 ): Promise<LocalDuplicateAnalysis> {
-  const list = await getVistoriasByLeilao(leilaoId);
+  const list = await getVistoriasByLeilao(leilaoId, { includePendingCloudDelete: true });
   const p = normPlaca(placa);
   const n = normNumVistoria(numeroVistoria);
   let conflictP = false;
@@ -210,10 +223,24 @@ export async function analyzeLocalDuplicateVistoria(
   if (!conflictP && !conflictN) return { duplicate: false };
   const type: VistoriaDuplicateType =
     conflictP && conflictN ? 'ambos' : conflictP ? 'placa' : 'numero';
+
+  const candidates = list.filter((v) => v.id != null && v.id !== excludeLocalId) as (Vistoria & {
+    id: number;
+  })[];
+  let peer: (Vistoria & { id: number }) | undefined;
+  const both = candidates.find(
+    (v) => normPlaca(v.placa) === p && normNumVistoria(v.numeroVistoria) === n,
+  );
+  if (both) peer = both;
+  else if (type === 'placa' || type === 'ambos')
+    peer = candidates.find((v) => normPlaca(v.placa) === p);
+  else peer = candidates.find((v) => normNumVistoria(v.numeroVistoria) === n);
+
   return {
     duplicate: true,
     type,
     info: buildDuplicateInfo(type, p, n),
+    conflictWith: peer ? vistoriaToConflictPeer(peer) : undefined,
   };
 }
 
@@ -227,7 +254,7 @@ export async function findLocalDuplicateVistoria(
   numeroVistoria: string,
   excludeLocalId?: number,
 ): Promise<Vistoria | undefined> {
-  const list = await getVistoriasByLeilao(leilaoId);
+  const list = await getVistoriasByLeilao(leilaoId, { includePendingCloudDelete: true });
   const p = normPlaca(placa);
   const n = normNumVistoria(numeroVistoria);
   for (const v of list) {
@@ -242,12 +269,29 @@ export async function findLocalDuplicateVistoria(
 /**
  * Conflito se houver duplicidade local ou na nuvem (mesmo leilão).
  */
+function cloudRowIsSelf(
+  row: { id?: string; external_id?: string | null } | null | undefined,
+  extEx: string,
+  cloudEx: string,
+): boolean {
+  if (!row) return false;
+  if (cloudEx && String(row.id ?? '') === cloudEx) return true;
+  if (extEx && isValidUuid(extEx)) {
+    const ex = String(row.external_id ?? '').trim();
+    if (ex === extEx) return true;
+  }
+  return false;
+}
+
 export async function assertNoDuplicateVistoriaForSync(opts: {
   leilaoId: number;
   placa: string;
   numeroVistoria: string;
   excludeLocalId?: number;
+  /** external_id (UUID) da própria linha, se aplicável */
   excludeExternalId?: string;
+  /** id (uuid PK) da própria linha na nuvem — preferir quando existir */
+  excludeCloudVistoriaId?: string;
 }): Promise<DuplicateCheckResult> {
   const local = await analyzeLocalDuplicateVistoria(
     opts.leilaoId,
@@ -261,6 +305,7 @@ export async function assertNoDuplicateVistoriaForSync(opts: {
       type: local.type,
       message: duplicateUserMessage(local.type),
       info: local.info,
+      conflictWith: local.conflictWith,
     };
   }
 
@@ -274,27 +319,27 @@ export async function assertNoDuplicateVistoriaForSync(opts: {
   const p = normPlaca(opts.placa);
   const n = normNumVistoria(opts.numeroVistoria);
   const extEx = opts.excludeExternalId?.trim() || '';
+  const cloudEx = opts.excludeCloudVistoriaId?.trim() || '';
 
   const { data: rowPlaca } = await supabase
     .from('vistorias')
-    .select('external_id')
+    .select('id, external_id')
     .eq('leilao', fk)
     .eq('placa', p)
     .maybeSingle();
 
   const { data: rowNum } = await supabase
     .from('vistorias')
-    .select('external_id')
+    .select('id, external_id')
     .eq('leilao', fk)
     .eq('num_vistoria', n)
     .maybeSingle();
 
-  const conflictPlaca =
-    rowPlaca &&
-    String((rowPlaca as { external_id?: string | null }).external_id ?? '').trim() !== extEx;
-  const conflictNum =
-    rowNum &&
-    String((rowNum as { external_id?: string | null }).external_id ?? '').trim() !== extEx;
+  const rp = rowPlaca as { id?: string; external_id?: string | null } | null;
+  const rn = rowNum as { id?: string; external_id?: string | null } | null;
+
+  const conflictPlaca = rp != null && !cloudRowIsSelf(rp, extEx, cloudEx);
+  const conflictNum = rn != null && !cloudRowIsSelf(rn, extEx, cloudEx);
 
   if (!conflictPlaca && !conflictNum) return { ok: true };
 
@@ -313,7 +358,19 @@ const clearedDuplicateFields = {
   syncMessage: undefined as string | undefined,
   duplicateType: undefined as VistoriaDuplicateType | undefined,
   duplicateInfo: undefined as VistoriaDuplicateInfo | undefined,
+  duplicateConflictWith: undefined as VistoriaDuplicateConflictPeer | undefined,
+  duplicateConflictWithList: undefined as VistoriaDuplicateConflictPeer[] | undefined,
 };
+
+function vistoriaToConflictPeer(v: Vistoria): VistoriaDuplicateConflictPeer {
+  return {
+    localVistoriaId: v.id as number,
+    placa: v.placa,
+    numeroVistoria: v.numeroVistoria,
+    createdBy: v.createdBy ?? null,
+    createdAt: v.createdAt,
+  };
+}
 
 type UploadFotoResult = { url: string | null; uploadFailed: boolean };
 
@@ -352,46 +409,107 @@ export interface InspectionData {
   /** Se omitido, usa getCreatedBySnapshot() no envio ao Supabase. */
   createdBy?: string;
   createdByUserId?: string | null;
-  /** Mesmo valor enviado como `external_id` (text) no Supabase — idempotência. */
+  /** Mesmo valor enviado como `external_id` no Supabase — deve ser UUID válido. */
   localUuid?: string;
+  /** PK em `public.vistorias` quando já existe linha na nuvem — priorizado em SELECT/UPDATE. */
+  cloudVistoriaId?: string;
   /** Conflito LWW: id local no IndexedDB */
   localVistoriaId?: number;
   /** Conflito LWW: `updatedAt` local (ms) antes do envio */
   localUpdatedAtMs?: number;
 }
 
+function devLogVistoriaSync(tag: string, payload: Record<string, unknown>) {
+  if (import.meta.env.DEV) {
+    console.debug(`[vistoria-sync] ${tag}`, payload);
+  }
+}
+
 /**
  * Envia a vistoria ao Supabase (Storage opcional + insert ou update com resolução de conflito).
+ * Linhas já na nuvem são resolvidas por `cloudVistoriaId` (PK) ou por `external_id` só se for UUID válido.
  */
 export async function saveInspection(data: InspectionData): Promise<boolean> {
   try {
-    if (import.meta.env.DEV) {
-      console.log(`[Supabase] Salvando vistoria na nuvem: ${data.placa}`);
-    }
+    const localVid = data.localVistoriaId;
+    const cloudHint = data.cloudVistoriaId?.trim();
 
-    const ext = data.localUuid?.trim();
-    if (!ext) {
-      if (import.meta.env.DEV) {
-        console.warn("[Supabase] localUuid ausente — idempotência não garantida; abortando envio.");
-      }
+    let extUuid: string | null = null;
+    if (localVid != null) {
+      const vLocal = await getVistoriaById(localVid);
+      if (!vLocal) return false;
+      const u = vLocal.localUuid?.trim();
+      extUuid = u && isValidUuid(u) ? u : null;
+    }
+    if (!extUuid) {
+      const t = data.localUuid?.trim();
+      extUuid = t && isValidUuid(t) ? t : null;
+    }
+    if (!extUuid) {
+      devLogVistoriaSync('saveInspection abort', {
+        reason: 'sem UUID válido para external_id',
+        localId: localVid,
+        cloudVistoriaId: cloudHint,
+      });
       return false;
     }
 
     const localMs = data.localUpdatedAtMs ?? 0;
-    const localVid = data.localVistoriaId;
+    const selectCols = 'id, updated_at, placa, num_vistoria, vistoriador, url_foto, leilao';
 
-    const { data: existing, error: selErr } = await supabase
-      .from('vistorias')
-      .select('id, updated_at, placa, num_vistoria, vistoriador, url_foto, leilao')
-      .eq('external_id', ext)
-      .maybeSingle();
+    let existing: VistoriaCloudRow | null = null;
 
-    if (selErr) {
-      console.error('[Supabase] Falha ao ler vistoria (external_id):', selErr);
-      return false;
+    if (cloudHint && isValidUuid(cloudHint)) {
+      const r = await supabase.from('vistorias').select(selectCols).eq('id', cloudHint).maybeSingle();
+      devLogVistoriaSync('saveInspection select', {
+        operacao: 'resolve',
+        filtroSupabase: 'id',
+        valorFiltro: cloudHint,
+        erro: r.error?.message,
+        encontrou: Boolean((r.data as VistoriaCloudRow | null)?.id),
+      });
+      if (r.error) {
+        console.error('[Supabase] Falha ao ler vistoria (id):', r.error);
+        return false;
+      }
+      existing = r.data as VistoriaCloudRow | null;
+    }
+
+    if (!existing?.id) {
+      const r = await supabase
+        .from('vistorias')
+        .select(selectCols)
+        .eq('external_id', extUuid)
+        .maybeSingle();
+      devLogVistoriaSync('saveInspection select', {
+        operacao: 'resolve',
+        filtroSupabase: 'external_id',
+        valorFiltro: extUuid,
+        erro: r.error?.message,
+        encontrou: Boolean((r.data as VistoriaCloudRow | null)?.id),
+      });
+      if (r.error) {
+        console.error('[Supabase] Falha ao ler vistoria (external_id):', r.error);
+        return false;
+      }
+      existing = r.data as VistoriaCloudRow | null;
     }
 
     const ex = existing as VistoriaCloudRow | null;
+    const cloudRowId = ex?.id != null ? String(ex.id) : '';
+    const operation: 'create' | 'update' = cloudRowId ? 'update' : 'create';
+    devLogVistoriaSync('saveInspection', {
+      localId: localVid,
+      cloudVistoriaId: cloudHint,
+      external_id: extUuid,
+      operation,
+      cloudRowId: cloudRowId || undefined,
+    });
+
+    const dupExcludeCloud =
+      cloudRowId ||
+      (cloudHint && isValidUuid(cloudHint) ? cloudHint : undefined);
+
     if (ex?.id != null) {
       const serverMs = supabaseTimestampToMs(ex.updated_at);
 
@@ -404,13 +522,14 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
             ...clearedDuplicateFields,
           });
         }
+        devLogVistoriaSync('saveInspection skip-update', { motivo: 'timestamp igual', cloudRowId });
         return true;
       }
 
       logSyncConflict({
         entity: 'vistoria',
         fluxo: 'create/sync',
-        external_id: ext,
+        external_id: extUuid,
         localVistoriaId: localVid,
         serverMs,
         localMs,
@@ -469,7 +588,8 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
           placa: data.placa,
           numeroVistoria: data.numero_vistoria,
           excludeLocalId: localVid,
-          excludeExternalId: ext,
+          excludeExternalId: extUuid,
+          excludeCloudVistoriaId: dupExcludeCloud,
         });
         if (!dup.ok) {
           await updateVistoria(localVid, {
@@ -477,17 +597,30 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
             syncMessage: dup.message,
             duplicateType: dup.type,
             duplicateInfo: dup.info,
+            duplicateConflictWith: dup.conflictWith,
           });
+          if (data.leilaoId != null) await recalculateDuplicateVistoriasForLeilao(data.leilaoId);
           return false;
         }
       }
 
+      devLogVistoriaSync('saveInspection update', {
+        filtroSupabase: 'id',
+        valorFiltro: cloudRowId,
+        payload: patch,
+      });
+
       const { data: after, error: upErr } = await supabase
         .from('vistorias')
         .update(patch)
-        .eq('external_id', ext)
+        .eq('id', cloudRowId)
         .select('id, updated_at')
         .maybeSingle();
+
+      devLogVistoriaSync('saveInspection update resposta', {
+        erro: upErr?.message,
+        data: after,
+      });
 
       if (upErr) throw new Error(upErr.message);
       const afterRow = after as { id?: string; updated_at?: string | null } | null;
@@ -510,7 +643,8 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
         placa: data.placa,
         numeroVistoria: data.numero_vistoria,
         excludeLocalId: localVid,
-        excludeExternalId: ext,
+        excludeExternalId: extUuid,
+        excludeCloudVistoriaId: dupExcludeCloud,
       });
       if (!dupIns.ok) {
         await updateVistoria(localVid, {
@@ -518,7 +652,9 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
           syncMessage: dupIns.message,
           duplicateType: dupIns.type,
           duplicateInfo: dupIns.info,
+          duplicateConflictWith: dupIns.conflictWith,
         });
+        if (data.leilaoId != null) await recalculateDuplicateVistoriasForLeilao(data.leilaoId);
         return false;
       }
     }
@@ -538,7 +674,7 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
       url_foto: urlFoto,
       baixado_pc: false,
       created_by: createdBy,
-      external_id: ext,
+      external_id: extUuid,
     };
 
     if (data.leilaoId != null) {
@@ -555,18 +691,22 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
     }
     if (data.vistoriador != null && data.vistoriador !== '') row.vistoriador = data.vistoriador;
 
+    devLogVistoriaSync('saveInspection insert', { payload: row });
+
     const { data: ins, error: dbError } = await supabase
       .from('vistorias')
       .insert([row])
       .select('id, updated_at')
       .maybeSingle();
 
+    devLogVistoriaSync('saveInspection insert resposta', { erro: dbError?.message, data: ins });
+
     if (dbError) {
       if (isUniqueViolation(dbError)) {
         if (import.meta.env.DEV) {
           console.warn(
             "[Supabase] Conflito único external_id (corrida); reaplicando resolução LWW:",
-            ext,
+            extUuid,
             dbError.message,
           );
         }
@@ -593,6 +733,7 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
     return true;
   } catch (error) {
     console.error("[Supabase] Erro ao salvar vistoria:", error);
+    devLogVistoriaSync('saveInspection catch', { erro: error instanceof Error ? error.message : String(error) });
     return false;
   }
 }
@@ -620,14 +761,20 @@ export async function syncInspectionFromLocal(
     return 'ok';
   }
 
-  let localUuid = readStableUuid(v);
-  if (!localUuid) {
-    localUuid =
-      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-        ? crypto.randomUUID()
-        : `vis-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
-    await updateVistoria(localVistoriaId, { localUuid });
+  const localUuid = readStableUuid(v);
+  if (!localUuid || !isValidUuid(localUuid)) {
+    if (import.meta.env.DEV) {
+      console.warn('[sync] syncInspectionFromLocal: localUuid inválido após correção', localVistoriaId);
+    }
+    return 'fail';
   }
+
+  const cloudId = v.cloudVistoriaId?.trim();
+  devLogVistoriaSync('syncInspectionFromLocal', {
+    localId: localVistoriaId,
+    cloudVistoriaId: cloudId,
+    external_id: localUuid,
+  });
 
   const dupSync = await assertNoDuplicateVistoriaForSync({
     leilaoId: v.leilaoId,
@@ -635,6 +782,7 @@ export async function syncInspectionFromLocal(
     numeroVistoria: v.numeroVistoria,
     excludeLocalId: localVistoriaId,
     excludeExternalId: localUuid,
+    excludeCloudVistoriaId: cloudId && isValidUuid(cloudId) ? cloudId : undefined,
   });
   if (!dupSync.ok) {
     await updateVistoria(localVistoriaId, {
@@ -642,7 +790,9 @@ export async function syncInspectionFromLocal(
       syncMessage: dupSync.message,
       duplicateType: dupSync.type,
       duplicateInfo: dupSync.info,
+      duplicateConflictWith: dupSync.conflictWith,
     });
+    await recalculateDuplicateVistoriasForLeilao(v.leilaoId);
     return 'duplicate';
   }
 
@@ -658,6 +808,7 @@ export async function syncInspectionFromLocal(
     createdBy: v.createdBy ?? undefined,
     createdByUserId: v.createdByUserId,
     localUuid,
+    cloudVistoriaId: cloudId && isValidUuid(cloudId) ? cloudId : undefined,
     localVistoriaId: localVistoriaId,
     localUpdatedAtMs,
   });
@@ -679,33 +830,57 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
     }
     return false;
   }
-  if (v.statusSync !== 'sincronizado') {
+
+  const cloudId = v.cloudVistoriaId?.trim();
+  const ns = normalizeVistoriaStatusSync(v.statusSync);
+  if (
+    ns === 'aguardando_ajuste' ||
+    ns === 'conflito_duplicidade' ||
+    ns === 'rascunho' ||
+    v.pendingCloudDelete
+  ) {
     return false;
   }
-
-  const ext = readStableUuid(v);
-  if (!ext) {
+  if (!cloudId || !isValidUuid(cloudId)) {
     if (import.meta.env.DEV) {
-      console.warn("[sync] Vistoria sem external_id/localUuid; não é possível atualizar na nuvem.");
+      console.warn('[sync] vistoria/update: sem cloudVistoriaId UUID — use fluxo create.', localVistoriaId);
     }
     return false;
   }
 
+  const extResolved = readStableUuid(v);
+  if (!extResolved || !isValidUuid(extResolved)) {
+    if (import.meta.env.DEV) {
+      console.warn("[sync] Vistoria sem localUuid UUID; não é possível checar duplicidade.");
+    }
+    return false;
+  }
+
+  devLogVistoriaSync('syncVistoriaUpdateToCloud início', {
+    localId: localVistoriaId,
+    cloudVistoriaId: cloudId,
+    external_id: extResolved,
+    operacao: 'update',
+  });
+
   const { data: serverRow, error } = await supabase
     .from('vistorias')
     .select('id, updated_at, placa, num_vistoria, vistoriador, url_foto')
-    .eq('external_id', ext)
+    .eq('id', cloudId)
     .maybeSingle();
 
   if (error) {
     console.error('[sync] Erro detalhado:', error);
+    if (import.meta.env.DEV) {
+      console.debug('[sync] vistoria/update fetch', { localVistoriaId, cloudId, error });
+    }
     return false;
   }
 
   const ex = serverRow as VistoriaCloudRow | null;
   if (ex?.id == null) {
     if (import.meta.env.DEV) {
-      console.warn("[sync] Linha não encontrada no Supabase (external_id):", ext);
+      console.warn("[sync] Linha não encontrada no Supabase (id):", cloudId);
     }
     return false;
   }
@@ -718,7 +893,7 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
       entity: 'vistoria',
       fluxo: 'update',
       localVistoriaId,
-      external_id: ext,
+      external_id: extResolved,
       serverMs,
       localMs,
       resolucao: serverMs > localMs ? 'servidor (sobrescreve local)' : 'local (envia update)',
@@ -752,7 +927,7 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
       entity: 'vistoria',
       fluxo: 'update',
       localVistoriaId,
-      external_id: ext,
+      external_id: extResolved,
       serverMs,
       localMs,
       resolucao: 'empate de timestamp; conteúdo difere — prioriza local (update)',
@@ -774,7 +949,8 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
     placa: v.placa,
     numeroVistoria: v.numeroVistoria,
     excludeLocalId: localVistoriaId,
-    excludeExternalId: ext,
+    excludeExternalId: extResolved,
+    excludeCloudVistoriaId: cloudId,
   });
   if (!dupUpd.ok) {
     await updateVistoria(localVistoriaId, {
@@ -782,7 +958,9 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
       syncMessage: dupUpd.message,
       duplicateType: dupUpd.type,
       duplicateInfo: dupUpd.info,
+      duplicateConflictWith: dupUpd.conflictWith,
     });
+    await recalculateDuplicateVistoriasForLeilao(v.leilaoId);
     return false;
   }
 
@@ -793,17 +971,34 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
     url_foto: urlFoto,
   };
 
+  devLogVistoriaSync('syncVistoriaUpdateToCloud update', {
+    filtroSupabase: 'id',
+    valorFiltro: cloudId,
+    payload: patch,
+  });
+
   const { data: after, error: upErr } = await supabase
     .from('vistorias')
     .update(patch)
-    .eq('external_id', ext)
+    .eq('id', cloudId)
     .select('id, updated_at')
     .maybeSingle();
 
   if (upErr) {
     console.error('[sync] Erro detalhado:', upErr);
+    devLogVistoriaSync('syncVistoriaUpdateToCloud resposta', {
+      localId: localVistoriaId,
+      cloudVistoriaId: cloudId,
+      erro: upErr.message,
+    });
     return false;
   }
+
+  devLogVistoriaSync('syncVistoriaUpdateToCloud resposta', {
+    localId: localVistoriaId,
+    cloudVistoriaId: cloudId,
+    data: after,
+  });
 
   const afterRow = after as { id?: string; updated_at?: string | null } | null;
   const newMs = supabaseTimestampToMs(afterRow?.updated_at);
