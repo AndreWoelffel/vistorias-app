@@ -34,9 +34,11 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-function formatDate(d: Date | undefined) {
-  if (!d || Number.isNaN(d.getTime())) return "—";
-  return new Date(d).toLocaleString("pt-BR", {
+function formatDate(d: Date | string | number | undefined) {
+  if (!d) return "—";
+  const date = new Date(d);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("pt-BR", {
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
@@ -71,6 +73,7 @@ export default function LeiloesPage() {
     });
     return unsub;
   }, [refresh]);
+
   const safeList = (leiloes ?? []).filter(
     (l) =>
       !l.deleted &&
@@ -81,18 +84,30 @@ export default function LeiloesPage() {
 
   const [vistoriaCounts, setVistoriaCounts] = useState<Record<number, number>>({});
 
+  // PERFORMANCE UPDATE: Contagem paralela com Promise.all
   useEffect(() => {
     if (loading) return;
     let cancelled = false;
+    
     (async () => {
       const next: Record<number, number> = {};
-      for (const l of leiloes ?? []) {
-        if (l.id != null && Number.isFinite(l.id) && l.id > 0) {
-          next[l.id] = await countVistorias(l.id);
-        }
+      const validLeiloes = (leiloes ?? []).filter(l => l.id != null && Number.isFinite(l.id));
+      
+      try {
+        const counts = await Promise.all(
+          validLeiloes.map(l => countVistorias(l.id as number))
+        );
+        
+        validLeiloes.forEach((l, index) => {
+          next[l.id as number] = counts[index];
+        });
+
+        if (!cancelled) setVistoriaCounts(next);
+      } catch (error) {
+        console.error("Erro ao carregar contagens:", error);
       }
-      if (!cancelled) setVistoriaCounts(next);
     })();
+
     return () => {
       cancelled = true;
     };
@@ -125,16 +140,11 @@ export default function LeiloesPage() {
     try {
       const { cloudOk, error } = await createLeilao(trimmed);
       if (cloudOk) {
-        toast({
-          title: "Leilão criado",
-          description: "Sincronizado com o Supabase.",
-        });
+        toast({ title: "Leilão criado", description: "Sincronizado com o Supabase." });
       } else {
         toast({
           title: "Salvo apenas no aparelho",
-          description:
-            error ??
-            "Não foi possível enviar ao Supabase. Use “Sincronizar” depois ou verifique policies/RLS.",
+          description: error ?? "Não foi possível enviar ao Supabase. Use “Sincronizar” depois ou verifique policies.",
         });
       }
       setNome("");
@@ -187,11 +197,7 @@ export default function LeiloesPage() {
       setEditId(null);
     } catch (err) {
       console.error(err);
-      toast({
-        title: "Erro",
-        description: err instanceof Error ? err.message : "Tente novamente.",
-        variant: "destructive",
-      });
+      toast({ title: "Erro", description: err instanceof Error ? err.message : "Tente novamente.", variant: "destructive" });
     } finally {
       setSavingEdit(false);
     }
@@ -209,11 +215,7 @@ export default function LeiloesPage() {
       const result = await deleteLeilao(deleteTarget.id);
 
       if (!result.ok && result.cloudError) {
-        toast({
-          title: "Não foi possível concluir",
-          description: result.cloudError,
-          variant: "destructive",
-        });
+        toast({ title: "Não foi possível concluir", description: result.cloudError, variant: "destructive" });
         setDeleteTarget(null);
         return;
       }
@@ -222,24 +224,16 @@ export default function LeiloesPage() {
         if (result.pendingCloudDelete) {
           toast({
             title: "Leilão removido da lista",
-            description:
-              "A exclusão na nuvem será concluída ao sincronizar. Se houver vistorias no servidor, a operação pode falhar e o leilão voltará a aparecer.",
+            description: "A exclusão na nuvem será concluída ao sincronizar. Se houver vistorias no servidor, a operação pode falhar.",
           });
         } else {
-          toast({
-            title: "Leilão excluído",
-            description: "Removido do aparelho.",
-          });
+          toast({ title: "Leilão excluído", description: "Removido do aparelho." });
         }
       }
       setDeleteTarget(null);
     } catch (err) {
       console.error(err);
-      toast({
-        title: "Erro ao excluir",
-        description: err instanceof Error ? err.message : "Tente novamente.",
-        variant: "destructive",
-      });
+      toast({ title: "Erro ao excluir", description: err instanceof Error ? err.message : "Tente novamente.", variant: "destructive" });
     } finally {
       setDeleting(false);
     }
@@ -290,7 +284,7 @@ export default function LeiloesPage() {
 
       <div className="flex-1 p-4 space-y-4">
         <Button
-          className="w-full h-12 gap-2 font-semibold rounded-xl"
+          className="w-full h-12 gap-2 font-bold rounded-xl shadow-md"
           onClick={() => setDialogOpen(true)}
           disabled={busy}
         >
@@ -304,58 +298,57 @@ export default function LeiloesPage() {
             <p className="text-sm">Carregando leilões...</p>
           </div>
         ) : safeList.length === 0 ? (
-          <div className="card-glow rounded-xl bg-card p-8 text-center space-y-2">
+          <div className="card-glow rounded-xl bg-card p-8 text-center space-y-2 border border-border/50">
             <Gavel className="h-10 w-10 mx-auto text-muted-foreground opacity-50" />
             <p className="text-sm font-semibold text-foreground">Nenhum leilão cadastrado</p>
             <p className="text-xs text-muted-foreground">
-              Toque em &quot;Novo Leilão&quot; para criar o primeiro e evitar erros de vínculo na nuvem.
+              Toque em "Novo Leilão" para criar o primeiro e evitar erros de vínculo na nuvem.
             </p>
           </div>
         ) : (
-          <ul className="space-y-2">
+          <ul className="space-y-3">
             {safeList.map((l) => {
               const vid = l.id as number;
               const nVis = vistoriaCounts[vid] ?? 0;
               return (
                 <li
                   key={l.id}
-                  className="card-glow rounded-xl bg-card p-4 border border-border/60 flex flex-col gap-3"
+                  className="card-glow rounded-xl bg-card p-4 border border-border/60 flex flex-col gap-3 shadow-sm transition-all"
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <p className="font-bold text-foreground">
+                      <p className="font-bold text-foreground text-base">
                         {l.nome}
-                        <span className="font-normal text-muted-foreground text-sm">
-                          {" "}
+                        <span className="font-normal text-muted-foreground text-sm ml-1">
                           ({nVis} {nVis === 1 ? "vistoria" : "vistorias"})
                         </span>
                       </p>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                      <div className="mt-2 flex flex-wrap items-center gap-2">
                         {isSynced(l) ? (
-                          <Badge variant="default" className="text-[10px]">
+                          <Badge variant="default" className="text-[10px] font-semibold bg-primary/20 text-primary hover:bg-primary/30">
                             Sincronizado
                           </Badge>
                         ) : (
-                          <Badge variant="secondary" className="text-[10px]">
+                          <Badge variant="secondary" className="text-[10px] font-semibold">
                             Local
                           </Badge>
                         )}
-                        {l.deleteBlocked ? (
-                          <Badge variant="destructive" className="text-[10px]">
+                        {l.deleteBlocked && (
+                          <Badge variant="destructive" className="text-[10px] font-semibold">
                             Exclusão bloqueada
                           </Badge>
-                        ) : null}
+                        )}
                       </div>
-                      {l.deleteBlocked ? (
-                        <div className="mt-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-foreground">
+                      
+                      {l.deleteBlocked && (
+                        <div className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-foreground">
                           <p className="font-semibold text-destructive">
-                            Este leilão não pode ser excluído pois possui vistorias na nuvem
+                            Este leilão não pode ser excluído pois possui vistorias na nuvem.
                           </p>
                           <p className="mt-1 text-muted-foreground">
-                            Remova ou reatribua as vistorias no Supabase e tente novamente, ou cancele a exclusão
-                            pendente.
+                            Remova ou reatribua as vistorias no Supabase e tente novamente.
                           </p>
-                          <div className="mt-2 flex flex-wrap gap-2">
+                          <div className="mt-3 flex flex-wrap gap-2">
                             <Button
                               type="button"
                               size="sm"
@@ -368,46 +361,30 @@ export default function LeiloesPage() {
                                 try {
                                   await resumeLeilaoCloudDelete(l.id);
                                   await refresh();
-                                  toast({
-                                    title: "Tentativa reenviada",
-                                    description: "Sincronizando exclusão na nuvem…",
-                                  });
+                                  toast({ title: "Tentativa reenviada", description: "Sincronizando..." });
                                 } catch (e) {
-                                  console.error(e);
-                                  toast({
-                                    title: "Erro",
-                                    description: e instanceof Error ? e.message : "Tente novamente.",
-                                    variant: "destructive",
-                                  });
+                                  toast({ title: "Erro", description: e instanceof Error ? e.message : "Erro.", variant: "destructive" });
                                 } finally {
                                   setSyncingId(null);
                                 }
                               }}
                             >
-                              Tentar excluir novamente
+                              Tentar novamente
                             </Button>
                             <Button
                               type="button"
                               size="sm"
                               variant="outline"
-                              className="h-8 text-[11px]"
+                              className="h-8 text-[11px] border-border/50"
                               disabled={busy}
                               onClick={async () => {
                                 if (l.id == null) return;
                                 try {
                                   await cancelPendingCloudDelete(l.id);
                                   await refresh();
-                                  toast({
-                                    title: "Exclusão cancelada",
-                                    description: "O leilão permanece na lista.",
-                                  });
+                                  toast({ title: "Exclusão cancelada", description: "Leilão mantido." });
                                 } catch (e) {
-                                  console.error(e);
-                                  toast({
-                                    title: "Erro",
-                                    description: e instanceof Error ? e.message : "Tente novamente.",
-                                    variant: "destructive",
-                                  });
+                                  toast({ title: "Erro", description: "Erro ao cancelar.", variant: "destructive" });
                                 }
                               }}
                             >
@@ -415,40 +392,26 @@ export default function LeiloesPage() {
                             </Button>
                           </div>
                         </div>
-                      ) : null}
-                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-                        <span>
-                          <span className="font-semibold text-foreground/80">ID local:</span> {l.id}
-                        </span>
+                      )}
+                      
+                      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground/80">
+                        <span><span className="font-semibold text-foreground/70">ID local:</span> {l.id}</span>
                         {l.supabaseId != null && (
-                          <span>
-                            <span className="font-semibold text-foreground/80">ID nuvem:</span> {l.supabaseId}
-                          </span>
+                          <span><span className="font-semibold text-foreground/70">ID nuvem:</span> {l.supabaseId}</span>
                         )}
-                        <span>
-                          <span className="font-semibold text-foreground/80">Data:</span>{" "}
-                          {formatDate(
-                            l.createdAt instanceof Date
-                              ? l.createdAt
-                              : l.createdAt
-                                ? new Date(l.createdAt as unknown as string)
-                                : undefined,
-                          )}
-                        </span>
+                        <span><span className="font-semibold text-foreground/70">Data:</span> {formatDate(l.createdAt)}</span>
                         {l.createdBy && (
-                          <span className="w-full sm:w-auto">
-                            <span className="font-semibold text-foreground/80">Criado por:</span>{" "}
-                            {l.createdBy}
-                          </span>
+                          <span className="w-full sm:w-auto"><span className="font-semibold text-foreground/70">Criado por:</span> {l.createdBy}</span>
                         )}
                       </div>
                     </div>
-                    <div className="flex shrink-0 flex-col gap-1.5">
+                    
+                    <div className="flex shrink-0 flex-col gap-2">
                       <Button
                         type="button"
                         variant="secondary"
                         size="sm"
-                        className="h-8 gap-1 text-[11px]"
+                        className="h-8 gap-1 text-[11px] font-medium"
                         disabled={busy || syncingId === l.id}
                         onClick={() => openEdit(l)}
                       >
@@ -460,15 +423,11 @@ export default function LeiloesPage() {
                           type="button"
                           variant="secondary"
                           size="sm"
-                          className="h-8 gap-1 text-[11px]"
+                          className="h-8 gap-1 text-[11px] font-medium"
                           disabled={busy || syncingId === l.id}
                           onClick={() => l.id != null && handleSync(l.id)}
                         >
-                          {syncingId === l.id ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <RefreshCw className="h-3.5 w-3.5" />
-                          )}
+                          {syncingId === l.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                           Sincronizar
                         </Button>
                       )}
@@ -477,7 +436,7 @@ export default function LeiloesPage() {
                           type="button"
                           variant="outline"
                           size="sm"
-                          className="h-8 gap-1 text-[11px] text-destructive border-destructive/40 hover:bg-destructive/10"
+                          className="h-8 gap-1 text-[11px] font-medium text-destructive border-destructive/30 hover:bg-destructive/10"
                           disabled={busy}
                           onClick={() => l.id != null && openDelete(l.id, l.nome)}
                         >
@@ -488,13 +447,7 @@ export default function LeiloesPage() {
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <span className="inline-flex w-full justify-stretch">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-8 gap-1 text-[11px] w-full opacity-50"
-                                disabled
-                              >
+                              <Button type="button" variant="outline" size="sm" className="h-8 gap-1 text-[11px] w-full opacity-50" disabled>
                                 <Trash2 className="h-3.5 w-3.5" />
                                 Excluir
                               </Button>
@@ -512,6 +465,7 @@ export default function LeiloesPage() {
         )}
       </div>
 
+      {/* MODAL NOVO LEILÃO */}
       <Dialog open={dialogOpen} onOpenChange={(o) => !busy && setDialogOpen(o)}>
         <DialogContent className="sm:max-w-md">
           <form onSubmit={handleSubmit}>
@@ -527,16 +481,16 @@ export default function LeiloesPage() {
                 value={nome}
                 onChange={(e) => setNome(e.target.value)}
                 placeholder="Ex.: Leilão SP — Fevereiro 2026"
-                className="mt-1 h-11"
+                className="mt-1 h-11 bg-background"
                 autoFocus
                 disabled={saving}
               />
             </div>
             <DialogFooter className="gap-2">
-              <Button type="button" variant="secondary" onClick={() => setDialogOpen(false)} disabled={saving}>
+              <Button type="button" variant="secondary" className="font-medium" onClick={() => setDialogOpen(false)} disabled={saving}>
                 Cancelar
               </Button>
-              <Button type="submit" disabled={saving || !nome.trim()}>
+              <Button type="submit" className="font-bold" disabled={saving || !nome.trim()}>
                 {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar"}
               </Button>
             </DialogFooter>
@@ -544,14 +498,8 @@ export default function LeiloesPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog
-        open={editOpen}
-        onOpenChange={(o) => {
-          if (savingEdit) return;
-          setEditOpen(o);
-          if (!o) setEditId(null);
-        }}
-      >
+      {/* MODAL EDITAR LEILÃO */}
+      <Dialog open={editOpen} onOpenChange={(o) => { if (savingEdit) return; setEditOpen(o); if (!o) setEditId(null); }}>
         <DialogContent className="sm:max-w-md">
           <form onSubmit={handleEditSubmit}>
             <DialogHeader>
@@ -565,24 +513,16 @@ export default function LeiloesPage() {
               <Input
                 value={editNome}
                 onChange={(e) => setEditNome(e.target.value)}
-                className="mt-1 h-11"
+                className="mt-1 h-11 bg-background"
                 autoFocus
                 disabled={savingEdit}
               />
             </div>
             <DialogFooter className="gap-2">
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => {
-                  setEditOpen(false);
-                  setEditId(null);
-                }}
-                disabled={savingEdit}
-              >
+              <Button type="button" variant="secondary" className="font-medium" onClick={() => { setEditOpen(false); setEditId(null); }} disabled={savingEdit}>
                 Cancelar
               </Button>
-              <Button type="submit" disabled={savingEdit || !editNome.trim()}>
+              <Button type="submit" className="font-bold" disabled={savingEdit || !editNome.trim()}>
                 {savingEdit ? <Loader2 className="h-4 w-4 animate-spin" /> : "Salvar"}
               </Button>
             </DialogFooter>
@@ -590,6 +530,7 @@ export default function LeiloesPage() {
         </DialogContent>
       </Dialog>
 
+      {/* ALERT DIALOG EXCLUSÃO */}
       <AlertDialog open={deleteTarget != null} onOpenChange={(o) => !o && !deleting && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -598,8 +539,7 @@ export default function LeiloesPage() {
               {deleteTarget && deleteTarget.vistoriasCount > 0 ? (
                 <p>
                   Este leilão possui <strong className="text-foreground">{deleteTarget.vistoriasCount}</strong>{" "}
-                  vistoria(s) neste aparelho. Deseja realmente excluir? As vistorias locais vinculadas serão
-                  removidas.
+                  vistoria(s) neste aparelho. Deseja realmente excluir? As vistorias locais vinculadas serão removidas.
                 </p>
               ) : (
                 <p>
@@ -608,13 +548,13 @@ export default function LeiloesPage() {
                 </p>
               )}
               {deleteTarget && deleteTarget.vistoriasCount > 0 && (
-                <p className="text-amber-600 dark:text-amber-400 text-sm">Esta ação não pode ser desfeita.</p>
+                <p className="text-amber-600 dark:text-amber-400 font-medium text-sm mt-2">Esta ação não pode ser desfeita.</p>
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>Cancelar</AlertDialogCancel>
-            <Button type="button" variant="destructive" disabled={deleting} onClick={() => confirmDelete()}>
+          <AlertDialogFooter className="gap-2 mt-4">
+            <AlertDialogCancel className="font-medium m-0" disabled={deleting}>Cancelar</AlertDialogCancel>
+            <Button type="button" variant="destructive" className="font-bold" disabled={deleting} onClick={() => confirmDelete()}>
               {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Excluir"}
             </Button>
           </AlertDialogFooter>

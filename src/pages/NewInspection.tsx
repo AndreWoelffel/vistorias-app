@@ -1,18 +1,37 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { createWorker, type Worker } from 'tesseract.js';
-import { Check, Camera, Hash, ImagePlus, Loader2, ArrowLeft, AlertTriangle } from 'lucide-react';
+import {
+  Check,
+  Camera,
+  Hash,
+  ImagePlus,
+  Loader2,
+  ArrowLeft,
+  AlertTriangle,
+  Bug,
+  ShieldCheck,
+  Settings,
+  XCircle,
+  X,
+  Trash2,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
-import { StickerCameraCapture } from '@/components/StickerCameraCapture';
-import { addVistoria, updateVistoria } from '@/hooks/useVistorias';
+import { addVistoria } from '@/hooks/useVistorias';
 import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync } from '@/lib/db';
-import { duplicateUserMessage } from '@/services/inspectionService';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { generateUuid } from '@/lib/uuid';
-import { ocrWithVoting, compressImage, detectOQAmbiguity, preloadAlprModels, detectStickerBox, extractAndPrepareSticker } from '@/lib/imageUtils';
+import {
+  ocrWithVoting,
+  compressImage,
+  detectOQAmbiguity,
+  preloadAlprModels,
+  detectStickerBox,
+  extractAndPrepareSticker,
+} from '@/lib/imageUtils';
 import { readStickerNumber } from '@/services/ocrService';
 import { useAuth } from '@/hooks/useAuth';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -29,16 +48,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 
 type Step = 'placa' | 'numero' | 'fotos' | 'saving';
+type CameraMode = 'placa' | 'numero' | 'chassi' | 'motor' | 'geral' | null;
 
 export default function NewInspection() {
   const { leilaoId: routeLeilaoId, ready: leilaoReady } = useRequireValidLeilao();
@@ -47,38 +59,91 @@ export default function NewInspection() {
   const { user } = useAuth();
   const { currentUser } = useCurrentUser();
 
+  // Controle de Permissão (Feature Flag)
+  const isAdmin = user?.role === 'admin' || currentUser?.role === 'admin';
+  const [debugMode, setDebugMode] = useState(false);
+
+  // Estados da UI
   const [step, setStep] = useState<Step>('placa');
+  const [cameraMode, setCameraMode] = useState<CameraMode>(null);
+  const [viewerImage, setViewerImage] = useState<string | null>(null);
+  const [isGalleryManagerOpen, setIsGalleryManagerOpen] = useState(false);
+
+  // Dados da Vistoria
   const [placa, setPlaca] = useState('');
   const [numero, setNumero] = useState('');
-  const [fotos, setFotos] = useState<Blob[]>([]);
-  const [fotoUrls, setFotoUrls] = useState<string[]>([]);
-  const [showCamera, setShowCamera] = useState(false);
+
+  // Fotos Base (Necessárias para o Resumo calcular o total)
+  const [fotoPlaca, setFotoPlaca] = useState<Blob | null>(null);
+  const [fotoAdesivo, setFotoAdesivo] = useState<Blob | null>(null);
+
+  // Fotos Técnicas
+  const [hasChassi, setHasChassi] = useState(true);
+  const [fotoChassi, setFotoChassi] = useState<File | null>(null);
+  const [chassiUrl, setChassiUrl] = useState<string | null>(null);
+
+  const [hasMotor, setHasMotor] = useState(true);
+  const [fotoMotor, setFotoMotor] = useState<File | null>(null);
+  const [motorUrl, setMotorUrl] = useState<string | null>(null);
+
+  // Fotos Gerais
+  const [fotosGerais, setFotosGerais] = useState<File[]>([]);
+  const [fotosGeraisUrls, setFotosGeraisUrls] = useState<string[]>([]);
+
+  // Estados de IA e Debug
   const [ocrLoading, setOcrLoading] = useState(false);
   const [oqWarning, setOqWarning] = useState<string | null>(null);
   const [geoCorrections, setGeoCorrections] = useState<string[]>([]);
   const [debugImage, setDebugImage] = useState<string | null>(null);
   const [charDebugImages, setCharDebugImages] = useState<string[]>([]);
-  const [showCancelDialog, setShowCancelDialog] = useState(false);
-
   const [ocrConfidence, setOcrConfidence] = useState<number | null>(null);
   const [stickerLoading, setStickerLoading] = useState(false);
-  const [stickerOcrDebugOpen, setStickerOcrDebugOpen] = useState(false);
   const [stickerOcrDebugUrl, setStickerOcrDebugUrl] = useState<string | null>(null);
+
+  const [showCancelDialog, setShowCancelDialog] = useState(false);
+
+  // Rastreador de URLs (Memory Leak Prevention)
+  const urlTracker = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     preloadAlprModels();
   }, []);
+
+  // Limpa URLs apenas ao desmontar o componente
+  useEffect(() => {
+    return () => {
+      urlTracker.current.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, []);
+
+  const createTrackedUrl = (blob: Blob) => {
+    const url = URL.createObjectURL(blob);
+    urlTracker.current.add(url);
+    return url;
+  };
+
+  const removePhotoGeral = (index: number) => {
+    const urlToRemove = fotosGeraisUrls[index];
+    URL.revokeObjectURL(urlToRemove);
+    urlTracker.current.delete(urlToRemove);
+
+    setFotosGerais((prev) => prev.filter((_, i) => i !== index));
+    setFotosGeraisUrls((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PROCESSAMENTO DE IA (OCR / YOLO)
+  // ════════════════════════════════════════════════════════════════════════
 
   const runOCR = useCallback(async (blob: Blob, type: 'placa' | 'numero') => {
     setOcrLoading(true);
     setOcrConfidence(null);
     setDebugImage(null);
     setCharDebugImages([]);
+
     try {
       const cropType = type === 'placa' ? 'plate' as const : 'number' as const;
-      const whitelist = type === 'placa'
-        ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-        : '0123456789';
+      const whitelist = type === 'placa' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' : '0123456789';
 
       const { text: rawText, confidence, corrections, debugImage: dbgImg, charDebugImages: charDbg } = await ocrWithVoting(
         blob,
@@ -87,44 +152,39 @@ export default function NewInspection() {
         whitelist
       );
 
-      let text = rawText;
+      // Salva o blob original para a contagem no Resumo e envio para nuvem
+      if (type === 'placa') setFotoPlaca(blob);
+      if (type === 'numero') setFotoAdesivo(blob);
+
       setOcrConfidence(confidence);
       if (dbgImg) setDebugImage(dbgImg);
       if (charDbg) setCharDebugImages(charDbg);
       if (corrections && corrections.length > 0) setGeoCorrections(corrections);
       else setGeoCorrections([]);
-      if (import.meta.env.DEV) {
-        console.log(
-          `ALPR result: "${text}" (confidence: ${confidence.toFixed(1)}%, corrections: ${corrections?.length || 0})`,
-        );
-      }
 
-      // Fallback limpo: não preencher com texto inválido; limpa o campo
-      if (type === 'placa' && (text === '' || confidence < 30)) {
+      if (type === 'placa' && (rawText === '' || confidence < 30)) {
         setPlaca('');
         toast({ ...fieldToasts.placaNaoLeu, variant: 'destructive' });
         return;
       }
+      
       if (type === 'numero' && confidence < 10) {
         toast({ ...fieldToasts.leituraFracaNumero, variant: 'destructive' });
         return;
       }
 
       if (type === 'placa') {
-        const match = text.match(/[A-Z]{3}[0-9][A-Z0-9][0-9]{2}/);
-        if (match) text = match[0];
-        const plate = text.slice(0, 7);
-        setPlaca(plate);
-        const warning = detectOQAmbiguity(plate);
+        const match = rawText.match(/[A-Z]{3}[0-9][A-Z0-9][0-9]{2}/);
+        const finalPlate = match ? match[0] : rawText.slice(0, 7);
+        setPlaca(finalPlate);
+        const warning = detectOQAmbiguity(finalPlate);
         if (warning) setOqWarning(warning);
       } else {
-        const match = text.match(/\d{5}/);
-        if (match) text = match[0];
-        setNumero(text.slice(0, 5));
+        const match = rawText.match(/\d{5}/);
+        setNumero(match ? match[0] : rawText.slice(0, 5));
       }
     } catch (err) {
       console.error('OCR error:', err);
-      if (type === 'placa') setPlaca('');
       toast({ ...fieldToasts.ocrFalhou, variant: 'destructive' });
     } finally {
       setOcrLoading(false);
@@ -138,11 +198,8 @@ export default function NewInspection() {
     setCharDebugImages([]);
     try {
       const cropType = type === 'placa' ? 'plate' as const : 'number' as const;
-      const whitelist = type === 'placa'
-        ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-        : '0123456789';
+      const whitelist = type === 'placa' ? 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' : '0123456789';
 
-      // Process all frames and pick best result
       const results: { text: string; confidence: number; corrections?: string[]; debugImage?: string; charDebugImages?: string[] }[] = [];
       for (const blob of blobs) {
         try {
@@ -157,27 +214,25 @@ export default function NewInspection() {
         return;
       }
 
-      // Pick highest confidence
       results.sort((a, b) => b.confidence - a.confidence);
       const best = results[0];
+      
+      if (type === 'placa') setFotoPlaca(blobs[0]);
+      if (type === 'numero') setFotoAdesivo(blobs[0]);
+
       let text = best.text;
       setOcrConfidence(best.confidence);
       if (best.debugImage) setDebugImage(best.debugImage);
       if (best.charDebugImages) setCharDebugImages(best.charDebugImages);
       if (best.corrections && best.corrections.length > 0) setGeoCorrections(best.corrections);
       else setGeoCorrections([]);
-      if (import.meta.env.DEV) {
-        console.log(
-          `Multi-frame ALPR: "${text}" (confidence: ${best.confidence.toFixed(1)}%, frames: ${results.length})`,
-        );
-      }
 
-      // Fallback limpo para placa: limpa o campo e toast
       if (type === 'placa' && (text === '' || best.confidence < 30)) {
         setPlaca('');
         toast({ ...fieldToasts.placaNaoLeu, variant: 'destructive' });
         return;
       }
+      
       if (type === 'numero' && best.confidence < 10) {
         toast({ ...fieldToasts.leituraFracaNumero, variant: 'destructive' });
         return;
@@ -204,58 +259,124 @@ export default function NewInspection() {
     }
   }, []);
 
-  const handlePlacaCapture = (blob: Blob) => {
-    setShowCamera(false);
-    runOCR(blob, 'placa');
+  const handleStickerCapture = useCallback(async (blob: Blob) => {
+    setCameraMode(null);
+    setStickerLoading(true);
+    setDebugImage(null);
+    setFotoAdesivo(blob); // Salva a foto bruta para envio
+    
+    try {
+      const box = await detectStickerBox(blob);
+      if (!box) {
+        toast({ ...fieldToasts.adesivoNaoViu, variant: 'destructive' });
+        return;
+      }
+      
+      const img = await createImageBitmap(blob);
+      const sourceCanvas = document.createElement('canvas');
+      sourceCanvas.width = img.width;
+      sourceCanvas.height = img.height;
+      sourceCanvas.getContext('2d')!.drawImage(img, 0, 0);
+      if (typeof img.close === 'function') img.close();
+
+      const stickerCanvas = extractAndPrepareSticker(sourceCanvas, box, {
+        onDebugBinarized: (url) => {
+          if (debugMode) setStickerOcrDebugUrl(url);
+        },
+      });
+      
+      const text = await readStickerNumber(stickerCanvas);
+      setNumero(text ?? '');
+      toast({ ...fieldToasts.numeroLido });
+    } catch (err) {
+      console.error('Ler adesivo:', err);
+      toast({ ...fieldToasts.lerAdesivoErro, variant: 'destructive' });
+    } finally {
+      setStickerLoading(false);
+    }
+  }, [debugMode]);
+
+  // ════════════════════════════════════════════════════════════════════════
+  // ROTEAMENTO DE CÂMERA E CAPTURA
+  // ════════════════════════════════════════════════════════════════════════
+
+  const handleCapture = async (blob: Blob) => {
+    if (cameraMode === 'placa') {
+      setCameraMode(null);
+      runOCR(blob, 'placa');
+    } else if (cameraMode === 'numero') {
+      handleStickerCapture(blob);
+    } else if (cameraMode === 'chassi') {
+      setCameraMode(null);
+      const compressed = await compressImage(blob);
+      const url = createTrackedUrl(compressed);
+      const file = new File([compressed], `CHASSI_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' });
+      setFotoChassi(file);
+      setChassiUrl(url);
+    } else if (cameraMode === 'motor') {
+      setCameraMode(null);
+      const compressed = await compressImage(blob);
+      const url = createTrackedUrl(compressed);
+      const file = new File([compressed], `MOTOR_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' });
+      setFotoMotor(file);
+      setMotorUrl(url);
+    } else if (cameraMode === 'geral') {
+      setCameraMode(null);
+      const compressed = await compressImage(blob);
+      const url = createTrackedUrl(compressed);
+      const timestamp = new Date().getTime();
+      const file = new File([compressed], `FOTO_${placa || 'GERAL'}_${timestamp}.jpg`, { type: 'image/jpeg' });
+      setFotosGerais((prev) => [...prev, file]);
+      setFotosGeraisUrls((prev) => [...prev, url]);
+    }
   };
 
-  const handlePlacaMultiCapture = (blobs: Blob[]) => {
-    setShowCamera(false);
-    handleMultiFrameCapture(blobs, 'placa');
+  const handleMultiCapture = (blobs: Blob[]) => {
+    if (cameraMode === 'placa') {
+      setCameraMode(null);
+      handleMultiFrameCapture(blobs, 'placa');
+    }
   };
 
-  const handleNumeroCapture = (blob: Blob) => {
-    setShowCamera(false);
-    runOCR(blob, 'numero');
-  };
-
-  const handleNumeroMultiCapture = (blobs: Blob[]) => {
-    setShowCamera(false);
-    handleMultiFrameCapture(blobs, 'numero');
-  };
-
-  const handleFotoCapture = async (blob: Blob) => {
-    setShowCamera(false);
-    const compressed = await compressImage(blob);
-    const url = URL.createObjectURL(compressed);
-    setFotos((prev) => [...prev, compressed]);
-    setFotoUrls((prev) => [...prev, url]);
-  };
+  // ════════════════════════════════════════════════════════════════════════
+  // SUBMISSÃO E FLUXO
+  // ════════════════════════════════════════════════════════════════════════
 
   const handleSave = async () => {
     if (!placa || !numero) {
       toast({ title: 'Campos obrigatórios', description: 'Preencha placa e número.', variant: 'destructive' });
       return;
     }
+    
     setStep('saving');
+    
     try {
-      const createdBy =
-        currentUser?.nome?.trim() || user?.nome?.trim() || 'Desconhecido';
-      const createdByUserId =
-        currentUser?.id != null ? String(currentUser.id) : null;
-
+      const createdBy = currentUser?.nome?.trim() || user?.nome?.trim() || 'Desconhecido';
+      const createdByUserId = currentUser?.id != null ? String(currentUser.id) : null;
       let localUuid: string;
+
       try {
         localUuid = generateUuid();
       } catch {
-        toast({
-          title: 'Não foi possível gerar identificador',
-          description: 'Feche o app e tente de novo. Se persistir, reinicie o dispositivo.',
-          variant: 'destructive',
-        });
-        setStep('form');
+        toast({ title: 'Erro de ID', description: 'Feche o app e tente de novo.', variant: 'destructive' });
+        setStep('placa');
         return;
       }
+
+      // Consolida todas as fotos em um único array
+      const allFotos: Blob[] = [...fotosGerais];
+
+      // Converte os Blobs da Placa e Adesivo em Arquivos Nomeados (Files)
+      if (fotoPlaca) {
+        allFotos.unshift(new File([fotoPlaca], `PLACA_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' }));
+      }
+      if (fotoAdesivo) {
+        allFotos.unshift(new File([fotoAdesivo], `ADESIVO_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' }));
+      }
+
+      // Adiciona as fotos técnicas que já foram convertidas para File anteriormente
+      if (hasChassi && fotoChassi) allFotos.push(fotoChassi);
+      if (hasMotor && fotoMotor) allFotos.push(fotoMotor);
 
       const nowMs = Date.now();
       const localId = await addVistoria({
@@ -263,7 +384,7 @@ export default function NewInspection() {
         placa: placa.toUpperCase(),
         numeroVistoria: numero,
         vistoriador: user?.nome || '',
-        fotos,
+        fotos: allFotos,
         statusSync: 'pendente_sync',
         createdAt: new Date(),
         updatedAt: nowMs,
@@ -276,15 +397,10 @@ export default function NewInspection() {
 
       const vAfter = await getVistoriaById(localId);
       const stAfter = normalizeVistoriaStatusSync(vAfter?.statusSync);
-      const isDup =
-        stAfter === 'aguardando_ajuste' || stAfter === 'conflito_duplicidade';
+      const isDup = stAfter === 'aguardando_ajuste' || stAfter === 'conflito_duplicidade';
 
       if (!isDup) {
-        await addToQueue({
-          type: 'create',
-          entity: 'vistoria',
-          payload: { localVistoriaId: localId },
-        });
+        await addToQueue({ type: 'create', entity: 'vistoria', payload: { localVistoriaId: localId } });
         const { processQueue } = await import('@/services/syncService');
         await processQueue();
       }
@@ -293,16 +409,11 @@ export default function NewInspection() {
       const st = normalizeVistoriaStatusSync(v?.statusSync);
 
       if (st === 'aguardando_ajuste') {
-        toast({
-          title: 'Salva no aparelho',
-          description: v?.syncMessage ?? 'Corrija e envie de novo.',
-        });
+        toast({ title: 'Salva no aparelho', description: v?.syncMessage ?? 'Corrija e envie de novo.' });
       } else if (st === 'conflito_duplicidade') {
         toast({
           title: 'Duplicado no servidor',
-          description:
-            v?.syncMessage ??
-            'Já existe essa placa ou número lá. Abra o registro, corrija e envie de novo.',
+          description: v?.syncMessage ?? 'Já existe essa placa ou número lá.',
           variant: 'destructive',
         });
       } else if (st === 'sincronizado') {
@@ -310,63 +421,43 @@ export default function NewInspection() {
       } else if (st === 'erro_sync') {
         toast({
           title: 'Erro ao enviar',
-          description:
-            v?.syncMessage ?? 'Sem internet ou falha no envio. Abra o painel e toque em enviar de novo.',
+          description: v?.syncMessage ?? 'Sem internet ou falha no envio.',
           variant: 'destructive',
         });
       } else {
-        toast({
-          title: 'Salva no aparelho',
-          description: 'Enviamos automaticamente quando a internet voltar.',
-        });
+        toast({ title: 'Salva no aparelho', description: 'Enviamos automaticamente quando a internet voltar.' });
       }
+      
       navigate(`/dashboard/${id}`, { replace: true });
     } catch (err) {
       console.error(err);
-      toast({
-        title: 'Não salvou',
-        description: 'Tente de novo. Se continuar, feche e abra o app.',
-        variant: 'destructive',
-      });
+      toast({ title: 'Não salvou', description: 'Tente de novo. Se continuar, feche e abra o app.', variant: 'destructive' });
       setStep('fotos');
     }
   };
 
-  const handleStickerCapture = useCallback(async (blob: Blob) => {
-    setShowCamera(false);
-    setStickerLoading(true);
-    try {
-      const box = await detectStickerBox(blob);
-      if (!box) {
-        toast({ ...fieldToasts.adesivoNaoViu, variant: 'destructive' });
-        return;
-      }
-      const img = await createImageBitmap(blob);
-      const sourceCanvas = document.createElement('canvas');
-      sourceCanvas.width = img.width;
-      sourceCanvas.height = img.height;
-      sourceCanvas.getContext('2d')!.drawImage(img, 0, 0);
-      if (typeof img.close === 'function') img.close();
-
-      const stickerCanvas = extractAndPrepareSticker(sourceCanvas, box, {
-        onDebugBinarized: (url) => {
-          setStickerOcrDebugUrl(url);
-          setStickerOcrDebugOpen(true);
-        },
-      });
-      const text = await readStickerNumber(stickerCanvas);
-      setNumero(text ?? '');
-      toast({ ...fieldToasts.numeroLido });
-    } catch (err) {
-      console.error('Ler adesivo:', err);
-      toast({ ...fieldToasts.lerAdesivoErro, variant: 'destructive' });
-    } finally {
-      setStickerLoading(false);
+  const handleFormSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (step === 'placa' && placa) {
+      setDebugImage(null);
+      setCharDebugImages([]);
+      setOcrConfidence(null);
+      setStep('numero');
     }
-  }, []);
+    else if (step === 'numero' && numero) {
+      setStep('fotos');
+    }
+    else if (step === 'fotos') {
+      handleSave();
+    }
+  };
 
   const handleCancel = () => setShowCancelDialog(true);
   const confirmCancel = () => navigate(`/dashboard/${id}`, { replace: true });
+
+  // ════════════════════════════════════════════════════════════════════════
+  // RENDERIZAÇÃO
+  // ════════════════════════════════════════════════════════════════════════
 
   if (!leilaoReady) {
     return (
@@ -380,20 +471,108 @@ export default function NewInspection() {
     );
   }
 
-  if (showCamera) {
-    if (step === 'placa') {
-      return <CameraCapture title="Foto da placa" overlayType="plate" multiFrame onCapture={handlePlacaCapture} onMultiCapture={handlePlacaMultiCapture} onCancel={() => setShowCamera(false)} />;
-    }
-    if (step === 'numero') {
-      return (
-        <StickerCameraCapture
-          title="Foto do adesivo"
-          onCapture={(blob) => handleStickerCapture(blob)}
-          onCancel={() => setShowCamera(false)}
+  // TELA 1: Lightbox (Visualizador de Imagem Cheia)
+  if (viewerImage) {
+    return (
+      <div className="fixed inset-0 z-[100] flex flex-col bg-black">
+        <div className="flex justify-end p-4">
+          <Button 
+            variant="secondary" 
+            size="icon" 
+            onClick={() => setViewerImage(null)} 
+            className="rounded-full shadow-lg"
+          >
+            <X className="h-6 w-6" />
+          </Button>
+        </div>
+        <div className="flex-1 overflow-auto flex items-center justify-center p-2">
+          <img 
+            src={viewerImage} 
+            alt="Visualização" 
+            className="max-w-full max-h-full object-contain" 
+          />
+        </div>
+      </div>
+    );
+  }
+
+  // TELA 2: Gerenciador de Galeria
+  if (isGalleryManagerOpen) {
+    return (
+      <div className="fixed inset-0 z-[90] flex flex-col bg-background">
+        <AppHeader 
+          title="Gerenciar Fotos Extras" 
+          showBack 
+          onBack={() => setIsGalleryManagerOpen(false)} 
         />
-      );
+        <div className="flex-1 overflow-y-auto p-4">
+          {fotosGeraisUrls.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
+              <ImagePlus className="h-12 w-12 mb-2 opacity-20" />
+              <p>Nenhuma foto extra adicionada.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              {fotosGeraisUrls.map((url, i) => (
+                <div key={url} className="relative aspect-square rounded-xl overflow-hidden border border-border shadow-sm group">
+                  <img 
+                    src={url} 
+                    className="w-full h-full object-cover cursor-pointer" 
+                    onClick={() => setViewerImage(url)} 
+                    alt={`Galeria ${i}`}
+                  />
+                  <button 
+                    onClick={() => removePhotoGeral(i)} 
+                    className="absolute top-2 right-2 p-2 bg-destructive/90 hover:bg-destructive text-white rounded-full shadow-lg active:scale-95 transition-all"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="p-4 border-t border-border/50 bg-card">
+          <Button 
+            onClick={() => setIsGalleryManagerOpen(false)} 
+            className="w-full h-14 font-bold text-lg rounded-xl shadow-md"
+          >
+            Voltar para a Vistoria
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // TELA 3: Câmera Dinâmica
+  if (cameraMode) {
+    let title = "Capturar Foto";
+    let overlay: 'plate' | 'number' | 'none' = 'none';
+    let isMulti = false;
+
+    if (cameraMode === 'placa') { 
+      title = "Foto da Placa"; 
+      overlay = 'plate'; 
+      isMulti = true; 
     }
-    return <CameraCapture title="Outra foto" overlayType="none" onCapture={handleFotoCapture} onCancel={() => setShowCamera(false)} />;
+    if (cameraMode === 'numero') { 
+      title = "Foto do Adesivo"; 
+      overlay = 'number'; 
+    }
+    if (cameraMode === 'chassi') title = "Foto do Chassi";
+    if (cameraMode === 'motor') title = "Foto do Motor";
+    if (cameraMode === 'geral') title = "Foto Geral";
+
+    return (
+      <CameraCapture 
+        title={title} 
+        overlayType={overlay} 
+        onCapture={handleCapture} 
+        onMultiCapture={isMulti ? handleMultiCapture : undefined}
+        onCancel={() => setCameraMode(null)} 
+        multiFrame={isMulti}
+      />
+    );
   }
 
   const steps = [
@@ -404,309 +583,500 @@ export default function NewInspection() {
 
   const currentIdx = steps.findIndex((s) => s.key === step);
 
+  // Cálculo de Resumo de Fotos
+  const totalFotos = 
+    (fotoPlaca ? 1 : 0) + 
+    (fotoAdesivo ? 1 : 0) + 
+    (hasChassi && fotoChassi ? 1 : 0) + 
+    (hasMotor && fotoMotor ? 1 : 0) + 
+    fotosGerais.length;
+
   return (
     <div className="flex min-h-screen flex-col bg-background">
       <AppHeader title="Nova vistoria" showBack onBack={handleCancel} />
 
-      {/* Progress */}
-      <div className="flex items-center gap-1 px-4 py-2 sm:py-3">
-        {steps.map((s, i) => (
-          <div key={s.key} className="flex flex-1 items-center gap-1">
-            <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold transition-colors ${
-              i < currentIdx ? 'bg-accent text-accent-foreground' :
-              i === currentIdx ? 'bg-primary text-primary-foreground' :
-              'bg-secondary text-muted-foreground'
-            }`}>
-              {i < currentIdx ? <Check className="h-4 w-4" /> : i + 1}
+      {/* Progress & Admin Debug Toggle */}
+      <div className="flex flex-col gap-2 px-4 py-2 sm:py-3">
+        <div className="flex items-center gap-1 w-full">
+          {steps.map((s, i) => (
+            <div key={s.key} className="flex flex-1 items-center gap-1">
+              <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold transition-colors ${
+                i < currentIdx ? 'bg-accent text-accent-foreground' :
+                i === currentIdx ? 'bg-primary text-primary-foreground' :
+                'bg-secondary text-muted-foreground'
+              }`}>
+                {i < currentIdx ? <Check className="h-4 w-4" /> : i + 1}
+              </div>
+              {i < steps.length - 1 && (
+                <div className={`h-0.5 flex-1 rounded-full transition-colors ${i < currentIdx ? 'bg-accent' : 'bg-border'}`} />
+              )}
             </div>
-            {i < steps.length - 1 && (
-              <div className={`h-0.5 flex-1 rounded-full transition-colors ${i < currentIdx ? 'bg-accent' : 'bg-border'}`} />
-            )}
+          ))}
+        </div>
+        
+        {isAdmin && step !== 'fotos' && (
+          <div className="flex justify-end mt-1">
+            <Button
+              type="button"
+              variant={debugMode ? "default" : "ghost"}
+              size="sm"
+              onClick={() => setDebugMode(!debugMode)}
+              className="h-7 text-[10px] gap-1.5 uppercase font-bold tracking-wider rounded-full shadow-sm"
+            >
+              <Bug className="h-3 w-3" />
+              {debugMode ? 'Debug Ativo' : 'Ativar Debug'}
+            </Button>
           </div>
-        ))}
+        )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-32 pt-2 space-y-4">
-        {step === 'placa' && (
-          <div className="space-y-4">
-            <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
-              <div>
-                <h2 className="text-lg font-bold">Placa</h2>
-                <p className="text-sm text-muted-foreground">Foto ou digitação.</p>
-              </div>
-              <Button onClick={() => setShowCamera(true)} className="w-full min-h-12 h-12 gap-2 text-base font-semibold" disabled={ocrLoading}>
-                <Camera className="h-5 w-5" />
-                Tirar fotos da placa
-              </Button>
-              {ocrLoading && (
-                <div className="flex items-center justify-center gap-2 py-3 text-primary">
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                  <span className="text-sm font-medium">Lendo placa…</span>
+      <form onSubmit={handleFormSubmit} className="flex-1 flex flex-col min-h-0">
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-32 pt-2 space-y-4">
+          
+          {/* ETAPA 1: PLACA */}
+          {step === 'placa' && (
+            <div className="space-y-4">
+              <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
+                <div>
+                  <h2 className="text-lg font-bold">Placa</h2>
+                  <p className="text-sm text-muted-foreground">Foto ou digitação.</p>
                 </div>
-              )}
-              {import.meta.env.DEV && ocrConfidence !== null && !ocrLoading && (
-                <div className={`flex items-center gap-2 rounded-lg p-3 ${
-                  ocrConfidence >= 80
-                    ? 'bg-accent/10 border border-accent/30'
-                    : 'bg-destructive/10 border border-destructive/30'
-                }`}>
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-bold">Confiança (dev)</span>
-                      <span className={`text-xs font-black ${ocrConfidence >= 80 ? 'text-accent' : 'text-destructive'}`}>
-                        {ocrConfidence.toFixed(0)}%
-                      </span>
+                <Button 
+                  type="button" 
+                  onClick={() => setCameraMode('placa')} 
+                  className="w-full min-h-12 h-12 gap-2 text-base font-semibold shadow-sm" 
+                  disabled={ocrLoading}
+                >
+                  <Camera className="h-5 w-5" />
+                  Tirar fotos da placa
+                </Button>
+                
+                {ocrLoading && (
+                  <div className="flex items-center justify-center gap-2 py-3 text-primary">
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    <span className="text-sm font-medium">Lendo placa…</span>
+                  </div>
+                )}
+                
+                {/* DEBUG: PLACA */}
+                {debugMode && ocrConfidence !== null && !ocrLoading && (
+                  <div className={`flex items-center gap-2 rounded-lg p-3 ${
+                    ocrConfidence >= 80 ? 'bg-accent/10 border border-accent/30' : 'bg-destructive/10 border border-destructive/30'
+                  }`}>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-bold">Confiança do OCR</span>
+                        <span className={`text-xs font-black ${ocrConfidence >= 80 ? 'text-accent' : 'text-destructive'}`}>
+                          {ocrConfidence.toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-muted">
+                        <div
+                          className={`h-full rounded-full transition-all ${ocrConfidence >= 80 ? 'bg-accent' : 'bg-destructive'}`}
+                          style={{ width: `${Math.min(ocrConfidence, 100)}%` }}
+                        />
+                      </div>
                     </div>
-                    <div className="h-1.5 w-full rounded-full bg-muted">
-                      <div
-                        className={`h-full rounded-full transition-all ${ocrConfidence >= 80 ? 'bg-accent' : 'bg-destructive'}`}
-                        style={{ width: `${Math.min(ocrConfidence, 100)}%` }}
-                      />
+                    {ocrConfidence < 80 && <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />}
+                  </div>
+                )}
+                
+                {ocrConfidence !== null && ocrConfidence < 80 && !ocrLoading && (
+                  <p className="text-xs text-amber-800 dark:text-amber-200 font-medium bg-amber-500/10 p-2 rounded-md">
+                    Confira a placa: se estiver errada, corrija no campo abaixo.
+                  </p>
+                )}
+                
+                {oqWarning && (
+                  <div className="flex items-start gap-2 rounded-lg bg-warning/10 border border-warning/30 p-3">
+                    <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
+                    <p className="text-xs text-foreground font-medium">{oqWarning}</p>
+                  </div>
+                )}
+                
+                {debugMode && (geoCorrections ?? []).length > 0 && (
+                  <div className="rounded-lg bg-primary/10 border border-primary/30 p-3 space-y-1">
+                    <p className="text-xs font-bold text-primary">Correções Geométricas Aplicadas</p>
+                    {(geoCorrections ?? []).map((c, i) => (
+                      <p key={i} className="text-xs text-muted-foreground font-mono">{c}</p>
+                    ))}
+                  </div>
+                )}
+                
+                {debugMode && debugImage && !ocrLoading && (
+                  <div className="space-y-2 p-3 border border-border/60 rounded-lg bg-secondary/20">
+                    <p className="text-xs font-bold text-foreground">Visão Binarizada do ALPR</p>
+                    <img
+                      src={debugImage}
+                      alt="Imagem processada pelo ALPR"
+                      className="w-full rounded-md border border-border bg-white"
+                      style={{ imageRendering: 'pixelated' }}
+                    />
+                  </div>
+                )}
+                
+                {debugMode && (charDebugImages ?? []).length > 0 && !ocrLoading && (
+                  <div className="space-y-2 p-3 border border-border/60 rounded-lg bg-secondary/20">
+                    <p className="text-xs font-bold text-foreground">Caracteres Segmentados</p>
+                    <div className="flex gap-1.5 overflow-x-auto pb-1">
+                      {(charDebugImages ?? []).map((img, i) => (
+                        <div key={i} className="flex flex-col items-center gap-1 shrink-0">
+                          <img
+                            src={img}
+                            alt={`Char ${i + 1}`}
+                            className="w-10 h-auto rounded border border-border bg-white shadow-sm"
+                            style={{ imageRendering: 'pixelated' }}
+                          />
+                          <span className="text-[10px] font-mono font-bold text-muted-foreground">{i + 1}</span>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                  {ocrConfidence < 80 && (
-                    <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />
-                  )}
-                </div>
-              )}
-              {ocrConfidence !== null && ocrConfidence < 80 && !ocrLoading && (
-                <p className="text-xs text-amber-800 dark:text-amber-200 font-medium">
-                  Confira a placa: se estiver errada, corrija no campo abaixo.
-                </p>
-              )}
-              {oqWarning && (
-                <div className="flex items-start gap-2 rounded-lg bg-warning/10 border border-warning/30 p-3">
-                  <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
-                  <p className="text-xs text-foreground">{oqWarning}</p>
-                </div>
-              )}
-              {import.meta.env.DEV && (geoCorrections ?? []).length > 0 && (
-                <div className="rounded-lg bg-primary/10 border border-primary/30 p-3 space-y-1">
-                  <p className="text-xs font-bold text-primary">Correções (dev)</p>
-                  {(geoCorrections ?? []).map((c, i) => (
-                    <p key={i} className="text-xs text-muted-foreground font-mono">{c}</p>
-                  ))}
-                </div>
-              )}
-              {import.meta.env.DEV && debugImage && !ocrLoading && (
-                <div className="space-y-2">
-                  <p className="text-xs font-bold text-muted-foreground">Debug imagem</p>
-                  <img
-                    src={debugImage}
-                    alt="Imagem binarizada processada pelo ALPR"
-                    className="w-full rounded-lg border border-border"
-                    style={{ imageRendering: 'pixelated' }}
+                )}
+
+                <div>
+                  <label className="block text-sm font-semibold text-foreground/80 mb-1">Placa</label>
+                  <Input
+                    value={placa}
+                    onChange={(e) => { setPlaca(e.target.value.toUpperCase().slice(0, 7)); setOqWarning(null); }}
+                    placeholder={ocrLoading ? 'Processando…' : 'Ex.: ABC1D23'}
+                    maxLength={7}
+                    autoCapitalize="characters"
+                    enterKeyHint="next"
+                    className="h-14 text-center text-xl font-black tracking-widest uppercase bg-background shadow-inner"
                   />
                 </div>
-              )}
-              {import.meta.env.DEV && (charDebugImages ?? []).length > 0 && !ocrLoading && (
-                <div className="space-y-2">
-                  <p className="text-xs font-bold text-muted-foreground">Caracteres (dev)</p>
-                  <div className="flex gap-1 overflow-x-auto">
-                    {(charDebugImages ?? []).map((img, i) => (
-                      <div key={i} className="flex flex-col items-center gap-1 shrink-0">
-                        <img
-                          src={img}
-                          alt={`Char ${i + 1}`}
-                          className="w-12 h-auto rounded border border-border bg-white"
-                          style={{ imageRendering: 'pixelated' }}
+              </div>
+            </div>
+          )}
+
+          {/* ETAPA 2: ADESIVO */}
+          {step === 'numero' && (
+            <div className="space-y-4">
+              <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
+                <div>
+                  <h2 className="text-lg font-bold">Número da vistoria</h2>
+                  <p className="text-sm text-muted-foreground">5 números do adesivo.</p>
+                </div>
+                <Button
+                  type="button"
+                  onClick={() => setCameraMode('numero')}
+                  disabled={stickerLoading}
+                  variant="secondary"
+                  className="w-full min-h-12 h-12 text-base font-semibold gap-2 shadow-sm"
+                >
+                  {stickerLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Camera className="h-5 w-5" />}
+                  Foto do adesivo
+                </Button>
+                
+                {stickerLoading && (
+                  <p className="text-sm font-medium text-center text-primary mt-2">Lendo adesivo…</p>
+                )}
+
+                {/* DEBUG: ADESIVO */}
+                {debugMode && stickerOcrDebugUrl && !stickerLoading && (
+                  <div className="space-y-2 p-3 border border-border/60 rounded-lg bg-secondary/20">
+                    <p className="text-xs font-bold text-foreground">Visão Binarizada do Adesivo (ALPR)</p>
+                    <img
+                      src={stickerOcrDebugUrl}
+                      alt="Imagem processada do adesivo"
+                      className="w-full max-h-[200px] object-contain rounded-md border border-border bg-white"
+                      style={{ imageRendering: 'pixelated' }}
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-sm font-semibold text-foreground/80 mb-1">Número (5 dígitos)</label>
+                  <Input
+                    value={numero}
+                    onChange={(e) => setNumero(e.target.value.replace(/\D/g, '').slice(0, 5))}
+                    placeholder="00000"
+                    maxLength={5}
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    enterKeyHint="next"
+                    autoComplete="off"
+                    className="h-14 text-center text-2xl font-black tracking-widest tabular-nums bg-background shadow-inner"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ETAPA 3: FOTOS E TÉCNICA */}
+          {step === 'fotos' && (
+            <div className="space-y-4">
+              
+              {/* CARD CHASSI */}
+              <div className="card-glow rounded-xl bg-card p-5 space-y-4 border border-border/50">
+                <div className="flex justify-between items-center">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-primary/10 p-2 rounded-lg">
+                      <ShieldCheck className="text-primary h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-bold">Foto do Chassi</h2>
+                      <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-tighter">
+                        Numeração estrutural
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex bg-secondary rounded-lg p-1">
+                    <button 
+                      type="button" 
+                      onClick={() => setHasChassi(true)} 
+                      className={`px-3 py-1.5 text-[10px] font-black rounded-md transition-all ${hasChassi ? 'bg-primary text-white shadow' : 'text-muted-foreground'}`}
+                    >
+                      SIM
+                    </button>
+                    <button 
+                      type="button" 
+                      onClick={() => { setHasChassi(false); setFotoChassi(null); setChassiUrl(null); }} 
+                      className={`px-3 py-1.5 text-[10px] font-black rounded-md transition-all ${!hasChassi ? 'bg-destructive text-white shadow' : 'text-muted-foreground'}`}
+                    >
+                      NÃO
+                    </button>
+                  </div>
+                </div>
+
+                {hasChassi ? (
+                  <div className="flex items-center gap-3">
+                    {chassiUrl && (
+                      <div 
+                        className="h-12 w-12 rounded-lg overflow-hidden border-2 border-primary/20 shadow-sm cursor-pointer shrink-0"
+                        onClick={() => setViewerImage(chassiUrl)}
+                      >
+                        <img src={chassiUrl} className="h-full w-full object-cover" alt="Chassi" />
+                      </div>
+                    )}
+                    <Button 
+                      type="button" 
+                      onClick={() => setCameraMode('chassi')} 
+                      variant="outline" 
+                      className="flex-1 h-12 gap-2 border-dashed border-primary/40 font-semibold text-foreground"
+                    >
+                      <Camera className="h-4 w-4 text-primary" /> 
+                      {fotoChassi ? 'Trocar Foto' : 'Fotografar'}
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-muted-foreground/80 italic flex items-center gap-1.5 bg-destructive/5 p-2 rounded-md border border-destructive/10">
+                    <XCircle className="h-3 w-3 text-destructive" /> 
+                    Inacessível ou inexistente.
+                  </p>
+                )}
+              </div>
+
+              {/* CARD MOTOR */}
+              <div className="card-glow rounded-xl bg-card p-5 space-y-4 border border-border/50">
+                <div className="flex justify-between items-center">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-primary/10 p-2 rounded-lg">
+                      <Settings className="text-primary h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-base font-bold">Foto do Motor</h2>
+                      <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-tighter">
+                        Numeração do bloco
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex bg-secondary rounded-lg p-1">
+                    <button 
+                      type="button" 
+                      onClick={() => setHasMotor(true)} 
+                      className={`px-3 py-1.5 text-[10px] font-black rounded-md transition-all ${hasMotor ? 'bg-primary text-white shadow' : 'text-muted-foreground'}`}
+                    >
+                      SIM
+                    </button>
+                    <button 
+                      type="button" 
+                      onClick={() => { setHasMotor(false); setFotoMotor(null); setMotorUrl(null); }} 
+                      className={`px-3 py-1.5 text-[10px] font-black rounded-md transition-all ${!hasMotor ? 'bg-destructive text-white shadow' : 'text-muted-foreground'}`}
+                    >
+                      NÃO
+                    </button>
+                  </div>
+                </div>
+
+                {hasMotor ? (
+                  <div className="flex items-center gap-3">
+                    {motorUrl && (
+                      <div 
+                        className="h-12 w-12 rounded-lg overflow-hidden border-2 border-primary/20 shadow-sm cursor-pointer shrink-0"
+                        onClick={() => setViewerImage(motorUrl)}
+                      >
+                        <img src={motorUrl} className="h-full w-full object-cover" alt="Motor" />
+                      </div>
+                    )}
+                    <Button 
+                      type="button" 
+                      onClick={() => setCameraMode('motor')} 
+                      variant="outline" 
+                      className="flex-1 h-12 gap-2 border-dashed border-primary/40 font-semibold text-foreground"
+                    >
+                      <Camera className="h-4 w-4 text-primary" /> 
+                      {fotoMotor ? 'Trocar Foto' : 'Fotografar'}
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-muted-foreground/80 italic flex items-center gap-1.5 bg-destructive/5 p-2 rounded-md border border-destructive/10">
+                    <XCircle className="h-3 w-3 text-destructive" /> 
+                    Inacessível ou sem numeração.
+                  </p>
+                )}
+              </div>
+
+              {/* CARD FOTOS GERAIS */}
+              <div className="card-glow rounded-xl bg-card p-5 space-y-4 border border-border/50">
+                <div className="flex justify-between items-start">
+                   <div>
+                     <h2 className="text-lg font-bold flex items-center gap-2">
+                       <ImagePlus className="text-primary h-5 w-5" /> Fotos Gerais
+                     </h2>
+                     <p className="text-xs text-muted-foreground mt-0.5">
+                       Laterais, avarias e ângulos extras.
+                     </p>
+                   </div>
+                   
+                   {fotosGeraisUrls.length > 0 && (
+                     <Button 
+                       type="button" 
+                       variant="ghost" 
+                       onClick={() => setIsGalleryManagerOpen(true)} 
+                       className="text-primary text-xs font-bold gap-1 px-2 h-8 underline"
+                     >
+                       <Trash2 className="h-3 w-3" /> Gerenciar
+                     </Button>
+                   )}
+                </div>
+
+                <Button 
+                  type="button" 
+                  onClick={() => setCameraMode('geral')} 
+                  variant="secondary" 
+                  className="w-full h-12 gap-2 font-bold shadow-sm"
+                >
+                  <ImagePlus className="h-5 w-5" /> 
+                  Adicionar foto extra
+                </Button>
+
+                {fotosGeraisUrls.length > 0 && (
+                  <div className="grid grid-cols-4 gap-2 pt-2">
+                    {fotosGeraisUrls.slice(0, 4).map((url, i) => (
+                      <div key={url} className="relative aspect-square">
+                        <img 
+                          src={url} 
+                          onClick={() => setViewerImage(url)} 
+                          className="w-full h-full object-cover rounded-lg border border-border cursor-pointer shadow-sm hover:opacity-80 transition-opacity" 
+                          alt={`Galeria ${i}`}
                         />
-                        <span className="text-[10px] font-mono text-muted-foreground">{i + 1}</span>
+                        {i === 3 && fotosGeraisUrls.length > 4 && (
+                          <div 
+                            className="absolute inset-0 bg-black/70 rounded-lg flex items-center justify-center text-white text-sm font-bold cursor-pointer backdrop-blur-[2px]"
+                            onClick={() => setIsGalleryManagerOpen(true)}
+                          >
+                            +{fotosGeraisUrls.length - 3}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
-                </div>
-              )}
-              <div>
-                <label className="block text-sm font-semibold text-foreground/80 mb-1">Placa</label>
-                <Input
-                  value={placa}
-                  onChange={(e) => { setPlaca(e.target.value.toUpperCase().slice(0, 7)); setOqWarning(null); }}
-                  placeholder={ocrLoading ? '…' : 'Ex.: ABC1D23'}
-                  maxLength={7}
-                  autoCapitalize="characters"
-                  enterKeyHint="next"
-                  className="h-14 text-center text-xl font-black tracking-widest uppercase"
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {step === 'numero' && (
-          <div className="space-y-4">
-            <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
-              <div>
-                <h2 className="text-lg font-bold">Número da vistoria</h2>
-                <p className="text-sm text-muted-foreground">5 números do adesivo.</p>
-              </div>
-              <Button
-                onClick={() => setShowCamera(true)}
-                disabled={stickerLoading}
-                variant="secondary"
-                className="w-full min-h-12 h-12 text-base font-semibold gap-2"
-              >
-                {stickerLoading ? (
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                ) : (
-                  <Camera className="h-5 w-5" />
                 )}
-                Foto do adesivo
-              </Button>
-              {stickerLoading && (
-                <p className="text-sm text-center text-muted-foreground">Lendo número…</p>
-              )}
-              <div>
-                <label className="block text-sm font-semibold text-foreground/80 mb-1">Número (5 dígitos)</label>
-                <Input
-                  value={numero}
-                  onChange={(e) => setNumero(e.target.value.replace(/\D/g, '').slice(0, 5))}
-                  placeholder="00000"
-                  maxLength={5}
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  enterKeyHint="next"
-                  autoComplete="off"
-                  className="h-14 text-center text-2xl font-black tracking-widest tabular-nums"
-                />
               </div>
-            </div>
-          </div>
-        )}
 
-        {step === 'fotos' && (
-          <div className="space-y-4">
-            <div className="card-glow rounded-xl bg-card p-4 sm:p-5 space-y-4">
-              <div>
-                <h2 className="text-lg font-bold">Fotos do veículo</h2>
-                <p className="text-sm text-muted-foreground">Opcional: mais ângulos.</p>
-              </div>
-              <Button variant="secondary" onClick={() => setShowCamera(true)} className="w-full min-h-12 h-12 gap-2 text-base font-semibold">
-                <ImagePlus className="h-5 w-5" />
-                Adicionar foto ({fotos.length})
-              </Button>
-              {(fotoUrls ?? []).length > 0 && (
-                <div className="grid grid-cols-3 gap-2">
-                  {(fotoUrls ?? []).map((url, i) => (
-                    <img key={i} src={url} alt={`Foto ${i + 1}`} className="aspect-square rounded-lg object-cover border border-border" />
-                  ))}
+              {/* CARD RESUMO FINAL */}
+              <div className="card-glow rounded-xl bg-card p-5 space-y-2.5 text-sm border-t-4 border-primary">
+                <h3 className="text-xs font-black text-muted-foreground uppercase tracking-widest mb-1">
+                  Resumo da Vistoria
+                </h3>
+                <div className="flex justify-between items-center py-1 border-b border-border/40">
+                  <span className="text-muted-foreground">Vistoriador</span>
+                  <span className="font-bold">{user?.nome}</span>
                 </div>
-              )}
-            </div>
-
-            <div className="card-glow rounded-xl bg-card p-4 space-y-1.5 text-sm">
-              <h3 className="text-xs font-semibold text-muted-foreground">Resumo</h3>
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Vistoriador</span>
-                <span className="font-semibold">{user?.nome}</span>
+                <div className="flex justify-between items-center py-1 border-b border-border/40">
+                  <span className="text-muted-foreground">Placa</span>
+                  <span className="font-black text-primary text-lg tracking-widest">{placa}</span>
+                </div>
+                <div className="flex justify-between items-center py-1 border-b border-border/40">
+                  <span className="text-muted-foreground">Nº Adesivo</span>
+                  <span className="font-black text-foreground tracking-widest">{numero}</span>
+                </div>
+                <div className="flex justify-between items-center py-1">
+                  <span className="text-muted-foreground">Fotos da Vistoria</span>
+                  <span className="font-black text-primary text-lg">{totalFotos}</span>
+                </div>
               </div>
-              <div className="flex justify-between text-sm gap-2">
-                <span className="text-muted-foreground shrink-0">Criado por</span>
-                <span className="font-semibold text-right truncate">
-                  {currentUser?.nome?.trim() || user?.nome || "—"}
-                </span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Placa</span>
-                <span className="font-bold tracking-wider">{placa}</span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Nº Vistoria</span>
-                <span className="font-bold tracking-wider">{numero}</span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Fotos</span>
-                <span className="font-bold">{fotos.length}</span>
-              </div>
-            </div>
-
-          </div>
-        )}
-
-        {step === 'saving' && (
-          <div className="flex flex-col items-center justify-center py-24 gap-4">
-            <Loader2 className="h-12 w-12 animate-spin text-primary" />
-            <p className="text-base font-semibold text-foreground">Salvando…</p>
-            <p className="text-sm text-muted-foreground text-center px-6">Não feche esta tela.</p>
-          </div>
-        )}
-      </div>
-
-      {step !== 'saving' && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-background/95 backdrop-blur-md px-4 pt-3 shadow-[0_-8px_30px_rgba(0,0,0,0.06)] dark:shadow-[0_-8px_30px_rgba(0,0,0,0.25)] pb-[max(1rem,env(safe-area-inset-bottom))]">
-          {step === 'placa' && (
-            <div className="mx-auto flex max-w-lg w-full gap-2">
-              <Button type="button" variant="ghost" size="sm" onClick={handleCancel} className="h-12 px-3 text-muted-foreground shrink-0">
-                Sair
-              </Button>
-              <Button type="button" onClick={() => setStep('numero')} disabled={!placa} className="h-12 min-h-12 flex-1 text-base font-bold rounded-xl">
-                Continuar
-              </Button>
             </div>
           )}
-          {step === 'numero' && (
-            <div className="mx-auto flex max-w-lg w-full gap-2">
-              <Button type="button" variant="ghost" onClick={() => setStep('placa')} className="h-12 min-h-12 px-3 shrink-0">
-                <ArrowLeft className="h-5 w-5" />
-              </Button>
-              <Button type="button" onClick={() => setStep('fotos')} disabled={!numero} className="h-12 min-h-12 flex-1 text-base font-bold rounded-xl">
-                Continuar
-              </Button>
-            </div>
-          )}
-          {step === 'fotos' && (
-            <div className="mx-auto flex max-w-lg w-full gap-2">
-              <Button type="button" variant="ghost" onClick={() => setStep('numero')} className="h-12 min-h-12 px-3 shrink-0">
-                <ArrowLeft className="h-5 w-5" />
-              </Button>
-              <Button type="button" onClick={handleSave} className="h-14 min-h-14 flex-1 gap-2 text-lg font-bold rounded-xl">
-                <Check className="h-6 w-6" />
-                Salvar vistoria
-              </Button>
+
+          {step === 'saving' && (
+            <div className="flex flex-col items-center justify-center py-24 gap-4">
+              <div className="bg-primary/10 p-4 rounded-full">
+                <Loader2 className="h-10 w-10 animate-spin text-primary" />
+              </div>
+              <div className="text-center space-y-1">
+                <p className="text-xl font-bold text-foreground">Salvando Vistoria</p>
+                <p className="text-sm font-medium text-muted-foreground px-6">
+                  Gravando no aparelho e enviando para nuvem...
+                </p>
+              </div>
             </div>
           )}
         </div>
-      )}
+
+        {step !== 'saving' && (
+          <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border/50 bg-background/95 backdrop-blur-md px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
+            <div className="mx-auto flex max-w-lg w-full gap-2">
+              {step !== 'placa' && (
+                <Button 
+                  type="button" 
+                  variant="outline" 
+                  onClick={() => setStep(step === 'fotos' ? 'numero' : 'placa')} 
+                  className="h-14 min-w-[80px] rounded-xl"
+                >
+                  <ArrowLeft className="h-5 w-5" />
+                </Button>
+              )}
+              <Button 
+                type="submit" 
+                disabled={step === 'placa' ? !placa : step === 'numero' ? !numero : false} 
+                className="h-14 flex-1 text-lg font-bold rounded-xl shadow-lg"
+              >
+                {step === 'fotos' ? (
+                  <>
+                    <Check className="mr-2 h-6 w-6" /> Concluir Vistoria
+                  </>
+                ) : (
+                  'Próximo Passo'
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+      </form>
 
       {/* Cancel Confirmation Dialog */}
       <AlertDialog open={showCancelDialog} onOpenChange={setShowCancelDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Sair sem salvar?</AlertDialogTitle>
+            <AlertDialogTitle>Descartar vistoria?</AlertDialogTitle>
             <AlertDialogDescription>
-              O que você preencheu nesta tela será perdido. Para guardar, volte e toque em Salvar vistoria.
+              Tudo o que você preencheu ou fotografou até agora será perdido.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Voltar</AlertDialogCancel>
-            <AlertDialogAction onClick={confirmCancel} className="bg-destructive text-destructive-foreground">
-              Sair mesmo assim
+          <AlertDialogFooter className="gap-2">
+            <AlertDialogCancel className="font-medium mt-0">Continuar Vistoria</AlertDialogCancel>
+            <AlertDialogAction 
+              onClick={confirmCancel} 
+              className="bg-destructive text-destructive-foreground font-bold hover:bg-destructive/90"
+            >
+              Sim, descartar
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-
-      <Dialog open={stickerOcrDebugOpen} onOpenChange={setStickerOcrDebugOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Imagem para leitura (teste)</DialogTitle>
-            <DialogDescription>Só aparece em modo desenvolvimento.</DialogDescription>
-          </DialogHeader>
-          {stickerOcrDebugUrl && (
-            <img
-              src={stickerOcrDebugUrl}
-              alt="Imagem binarizada para OCR"
-              className="w-full max-h-[50vh] object-contain rounded-md border border-border bg-white"
-              style={{ imageRendering: 'pixelated' }}
-            />
-          )}
-          <DialogFooter>
-            <Button type="button" variant="secondary" onClick={() => setStickerOcrDebugOpen(false)}>
-              Fechar
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

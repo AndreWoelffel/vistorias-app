@@ -21,13 +21,19 @@ export function AppHeader({ title, showBack = false, onBack }: AppHeaderProps) {
   };
 
   return (
-    <header className="sticky top-0 z-40 flex items-center gap-3 border-b border-border bg-card/95 px-4 py-3 backdrop-blur-sm">
+    <header className="sticky top-0 z-40 flex items-center gap-3 border-b border-border bg-card/95 px-4 py-3 backdrop-blur-sm shadow-sm">
       {showBack && (
-        <button onClick={handleBack} className="rounded-lg p-1.5 text-foreground/70 active:bg-secondary">
+        <button 
+          onClick={handleBack} 
+          className="rounded-lg p-1.5 text-foreground/70 hover:bg-secondary/80 active:bg-secondary transition-colors"
+        >
           <ArrowLeft className="h-6 w-6" />
         </button>
       )}
-      <h1 className="flex-1 text-base font-bold text-foreground truncate sm:text-lg">{title}</h1>
+      <h1 className="flex-1 text-base font-bold text-foreground truncate sm:text-lg">
+        {title}
+      </h1>
+      
       <OperationalStatusStrip
         online={online}
         syncing={syncing}

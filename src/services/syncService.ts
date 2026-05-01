@@ -35,7 +35,6 @@ export type ProcessQueueResult = {
   failed: number;
   skipped: boolean;
   rounds: number;
-  /** Itens na fila com retries > 0 (próxima execução aplicará delay linear). */
   remainingInBackoff: number;
 };
 
@@ -56,73 +55,45 @@ export function subscribeSyncUi(cb: () => void): () => void {
 
 function emitSyncUi() {
   syncUiListeners.forEach((cb) => {
-    try {
-      cb();
-    } catch {
-      /* ignore */
-    }
+    try { cb(); } catch { /* ignore */ }
   });
 }
-
-// --- Eventos de ciclo de vida (UX: toasts / analytics) ---
 
 const syncStartListeners = new Set<() => void>();
 const syncSuccessListeners = new Set<(detail: SyncLifecycleDetail) => void>();
 const syncErrorListeners = new Set<(detail: SyncLifecycleDetail) => void>();
 
-/** Disparado na primeira rodada em que há itens acionáveis na fila. */
 export function onSyncStart(listener: () => void): () => void {
   syncStartListeners.add(listener);
   return () => syncStartListeners.delete(listener);
 }
 
-/** Disparado ao terminar o lote com `failed === 0` (houve trabalho na fila). */
 export function onSyncSuccess(listener: (detail: SyncLifecycleDetail) => void): () => void {
   syncSuccessListeners.add(listener);
   return () => syncSuccessListeners.delete(listener);
 }
 
-/** Disparado ao terminar o lote com `failed > 0`. */
 export function onSyncError(listener: (detail: SyncLifecycleDetail) => void): () => void {
   syncErrorListeners.add(listener);
   return () => syncErrorListeners.delete(listener);
 }
 
 function emitSyncStart() {
-  syncStartListeners.forEach((cb) => {
-    try {
-      cb();
-    } catch {
-      /* ignore */
-    }
-  });
+  syncStartListeners.forEach((cb) => { try { cb(); } catch { /* ignore */ } });
 }
 
 function emitSyncSuccess(detail: SyncLifecycleDetail) {
-  syncSuccessListeners.forEach((cb) => {
-    try {
-      cb(detail);
-    } catch {
-      /* ignore */
-    }
-  });
+  syncSuccessListeners.forEach((cb) => { try { cb(detail); } catch { /* ignore */ } });
 }
 
 function emitSyncError(detail: SyncLifecycleDetail) {
-  syncErrorListeners.forEach((cb) => {
-    try {
-      cb(detail);
-    } catch {
-      /* ignore */
-    }
-  });
+  syncErrorListeners.forEach((cb) => { try { cb(detail); } catch { /* ignore */ } });
 }
 
 export function isSyncProcessing(): boolean {
   return queueProcessing;
 }
 
-/** Erro persistente na fila (`status: 'failed'` após esgotar retries, ou legado). */
 export function isQueueItemPermanentFailure(item: SyncQueueItem): boolean {
   if (item.status === 'failed') return true;
   if (item.failed === true) return true;
@@ -136,7 +107,6 @@ function isActionableItem(item: SyncQueueItem, _now: number): boolean {
   return true;
 }
 
-/** retries 1 → 1s, 2 → 2s, … até o teto (evita rajadas de requisições). */
 function retryDelayBeforeAttemptMs(retries: number): number {
   return Math.min(RETRY_DELAY_CAP_MS, Math.max(0, retries) * 1000);
 }
@@ -158,7 +128,6 @@ export async function getFailedSyncCount(): Promise<number> {
   return items.filter((i) => isQueueItemPermanentFailure(i)).length;
 }
 
-/** Contagens separadas: ainda tentáveis vs falha permanente. */
 export async function getSyncQueueCounts(): Promise<{ pending: number; failed: number }> {
   const now = Date.now();
   const items = await getQueue();
@@ -168,17 +137,12 @@ export async function getSyncQueueCounts(): Promise<{ pending: number; failed: n
   };
 }
 
-/** Menor = processar primeiro: delete (consistência/UX) → update → create. */
 function syncTypePriority(t: SyncQueueItem['type']): number {
   switch (t) {
-    case 'delete':
-      return 0;
-    case 'update':
-      return 1;
-    case 'create':
-      return 2;
-    default:
-      return 2;
+    case 'delete': return 0;
+    case 'update': return 1;
+    case 'create': return 2;
+    default: return 2;
   }
 }
 
@@ -214,8 +178,8 @@ async function recordFailure(itemId: number, err?: unknown): Promise<{ permanent
     maxRetries: MAX_SYNC_RETRIES,
     errorMessage: formatErr(err),
   });
-  if (permanentFailure) {
-    console.error('[sync] Erro detalhado:', err != null ? err : `Fila: status "failed" (id=${itemId}, retries=${retries})`);
+  if (permanentFailure && import.meta.env.DEV) {
+    console.warn('[sync] Fila em falha permanente:', err != null ? err : `id=${itemId}, retries=${retries}`);
   }
   return { permanentFailure };
 }
@@ -257,16 +221,13 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
   if (item.entity === 'leilao') {
     const payload = item.payload as { localId?: number };
     const localId = payload.localId;
-    if (localId == null || !Number.isFinite(localId)) {
-      return 'done';
-    }
+    if (localId == null || !Number.isFinite(localId)) return 'done';
 
     if (item.type === 'create') {
       const leilao = await getLeilaoById(localId);
       if (!leilao || leilao.deleted) return 'done';
       if (leilao.supabaseId != null) return 'done';
       const r = await syncLeilaoToCloud(localId);
-      /** `syncLeilaoToCloud` já remove entradas `create` da fila para este localId */
       return r.ok ? 'cleared' : 'fail';
     }
 
@@ -281,34 +242,21 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
         .eq('id', leilao.supabaseId)
         .maybeSingle();
 
-      if (fetchErr) {
-        console.error('[sync] Erro detalhado:', fetchErr);
-        return 'fail';
-      }
+      if (fetchErr) return 'fail';
 
-      const serverMs = supabaseTimestampToMs(
-        (serverRow as { updated_at?: string | null } | null)?.updated_at,
-      );
-      const localMs =
-        leilao.updatedAt ?? (leilao.createdAt ? new Date(leilao.createdAt).getTime() : 0);
+      const serverMs = supabaseTimestampToMs((serverRow as { updated_at?: string | null } | null)?.updated_at);
+      const localMs = leilao.updatedAt ?? (leilao.createdAt ? new Date(leilao.createdAt).getTime() : 0);
 
       if (serverRow && serverMs !== localMs) {
         logSyncConflict({
-          entity: 'leilao',
-          localId,
-          supabaseId: leilao.supabaseId,
-          serverMs,
-          localMs,
-          resolucao: serverMs > localMs ? 'servidor (sobrescreve local)' : 'local (envia update)',
+          entity: 'leilao', localId, supabaseId: leilao.supabaseId, serverMs, localMs,
+          resolucao: serverMs > localMs ? 'servidor' : 'local',
         });
       }
 
       if (serverMs > localMs) {
         const nomeSrv = String((serverRow as { nome?: string } | null)?.nome ?? '').trim();
-        await updateLeilao(localId, {
-          nome: nomeSrv || leilao.nome,
-          updatedAt: serverMs,
-        });
+        await updateLeilao(localId, { nome: nomeSrv || leilao.nome, updatedAt: serverMs });
         return 'done';
       }
 
@@ -318,58 +266,26 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
           await updateLeilao(localId, { updatedAt: serverMs });
           return 'done';
         }
-        logSyncConflict({
-          entity: 'leilao',
-          localId,
-          supabaseId: leilao.supabaseId,
-          serverMs,
-          localMs,
-          resolucao: 'empate de timestamp; conteúdo difere — prioriza local (update)',
-        });
       }
 
-      const { data: after, error } = await supabase
-        .from('leiloes')
-        .update({ nome: leilao.nome.trim() })
-        .eq('id', leilao.supabaseId)
-        .select('updated_at')
-        .maybeSingle();
-
-      if (error) {
-        console.error('[sync] Erro detalhado:', error);
-        return 'fail';
-      }
+      const { data: after, error } = await supabase.from('leiloes').update({ nome: leilao.nome.trim() }).eq('id', leilao.supabaseId).select('updated_at').maybeSingle();
+      if (error) return 'fail';
 
       const newMs = supabaseTimestampToMs((after as { updated_at?: string | null } | null)?.updated_at);
-      await updateLeilao(localId, {
-        updatedAt: newMs > 0 ? newMs : Date.now(),
-      });
+      await updateLeilao(localId, { updatedAt: newMs > 0 ? newMs : Date.now() });
       return 'done';
     }
 
     if (item.type === 'delete') {
       const leilao = await getLeilaoById(localId);
-      if (!leilao) return 'done';
-      if (leilao.supabaseId == null) return 'done';
-      if (leilao.deleteBlocked) {
-        return 'skip';
-      }
+      if (!leilao || leilao.supabaseId == null) return 'done';
+      if (leilao.deleteBlocked) return 'skip';
+      
       const { error } = await supabase.from('leiloes').delete().eq('id', leilao.supabaseId);
       if (error) {
-        console.error('[sync] Erro detalhado:', error);
         if (isForeignKeyViolation(error)) {
-          await updateLeilao(localId, {
-            deleted: false,
-            deleteBlocked: true,
-          });
-          if (item.id != null) {
-            await setSyncQueueItemRetryPaused(item.id, true);
-          }
-          if (import.meta.env.DEV) {
-            console.warn(
-              "[sync] Exclusão na nuvem bloqueada (FK): vistorias ainda referenciam o leilão. Fila pausada; deleteBlocked=true.",
-            );
-          }
+          await updateLeilao(localId, { deleted: false, deleteBlocked: true });
+          if (item.id != null) await setSyncQueueItemRetryPaused(item.id, true);
           return 'blocked';
         }
         return 'fail';
@@ -386,14 +302,7 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     if (vid == null || !Number.isFinite(vid)) return 'done';
     const r = await syncInspectionFromLocal(vid);
     if (r === 'duplicate') {
-      if (item.id != null) {
-        await setSyncQueueItemRetryPaused(item.id, true);
-      }
-      if (import.meta.env.DEV) {
-        console.warn(
-          '[sync] vistoria/create pausado: duplicidade ou aguardando ajuste (sem retry até correção).',
-        );
-      }
+      if (item.id != null) await setSyncQueueItemRetryPaused(item.id, true);
       return 'blocked';
     }
     return r === 'ok' ? 'done' : 'fail';
@@ -408,15 +317,6 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     if (n0 === 'aguardando_ajuste' || n0 === 'conflito_duplicidade') {
       if (item.id != null) await setSyncQueueItemRetryPaused(item.id, true);
       return 'blocked';
-    }
-    if (import.meta.env.DEV) {
-      console.debug('[syncService] vistoria/update item', {
-        queueItemId: item.id,
-        localVistoriaId: vid,
-        cloudVistoriaId: v0?.cloudVistoriaId,
-        statusSync: v0?.statusSync,
-        payload,
-      });
     }
     const ok = await syncVistoriaUpdateToCloud(vid);
     if (ok) return 'done';
@@ -435,72 +335,34 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     if (vid == null || !Number.isFinite(vid)) return 'done';
     const v = await getVistoriaById(vid);
     if (!v) return 'done';
-    if (!v.pendingCloudDelete) {
-      if (import.meta.env.DEV) {
-        console.warn('[sync] vistoria/delete: fila obsoleta (sem pendingCloudDelete); ignorando.');
-      }
-      return 'done';
-    }
+    if (!v.pendingCloudDelete) return 'done';
+    
     const cloudId = v.cloudVistoriaId?.trim();
     if (!cloudId) {
       await deleteVistoria(vid);
       return 'done';
     }
     const { error } = await supabase.from('vistorias').delete().eq('id', cloudId);
-    if (error) {
-      console.error('[sync] Erro detalhado:', error);
-      return 'fail';
-    }
+    if (error) return 'fail';
     await deleteVistoria(vid);
     return 'done';
   }
 
-  if (import.meta.env.DEV) console.warn("[sync] Item de fila não reconhecido:", item);
   return "done";
 }
 
-/**
- * Processa a fila em várias rodadas (ex.: criar leilão antes da vistoria).
- */
 export async function processQueue(): Promise<ProcessQueueResult> {
   const t0 = Date.now();
 
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     const q = await getQueue();
-    const now = Date.now();
     const remainingInBackoff = q.filter(
-      (i) =>
-        !isQueueItemPermanentFailure(i) &&
-        (i.retries ?? 0) > 0 &&
-        (i.retries ?? 0) < MAX_SYNC_RETRIES,
+      (i) => !isQueueItemPermanentFailure(i) && (i.retries ?? 0) > 0 && (i.retries ?? 0) < MAX_SYNC_RETRIES,
     ).length;
-    if (import.meta.env.DEV) {
-      console.log("[sync] processQueue resumo", {
-        durationMs: Date.now() - t0,
-        offline: true,
-        processed: 0,
-        failed: 0,
-        rounds: 0,
-        remainingInBackoff,
-        remainingActionable: q.filter((i) => isActionableItem(i, now)).length,
-        remainingFailed: q.filter((i) => isQueueItemPermanentFailure(i)).length,
-        totalInQueue: q.length,
-      });
-      console.log("[sync] Processados:", 0);
-      console.log("[sync] Falhas:", 0);
-    }
     return { processed: 0, failed: 0, skipped: true, rounds: 0, remainingInBackoff };
   }
 
   if (queueProcessing) {
-    if (import.meta.env.DEV) {
-      console.log("[sync] processQueue resumo", {
-        durationMs: Date.now() - t0,
-        skippedAlreadyRunning: true,
-      });
-      console.log("[sync] Processados:", 0);
-      console.log("[sync] Falhas:", 0);
-    }
     return { processed: 0, failed: 0, skipped: true, rounds: 0, remainingInBackoff: 0 };
   }
 
@@ -530,37 +392,22 @@ export async function processQueue(): Promise<ProcessQueueResult> {
       for (const item of pending) {
         if (item.id == null) continue;
 
-        if (typeof navigator !== "undefined" && !navigator.onLine) {
-          if (import.meta.env.DEV) {
-            console.warn("[sync] offline durante processQueue; encerrando lote (retoma ao voltar online).");
-          }
-          break;
-        }
+        if (typeof navigator !== "undefined" && !navigator.onLine) break;
 
         await sleepLinearRetryDelay(item.retries ?? 0);
 
-        if (typeof navigator !== "undefined" && !navigator.onLine) {
-          if (import.meta.env.DEV) {
-            console.warn("[sync] offline após delay de retry; encerrando lote.");
-          }
-          break;
-        }
-
-        if (import.meta.env.DEV) console.log("[sync] Processando:", item);
+        if (typeof navigator !== "undefined" && !navigator.onLine) break;
 
         try {
           const result = await processOneItem(item);
-          if (result === 'done') {
-            await removeFromQueue(item.id);
-            processed++;
-            progressed = true;
-          } else if (result === 'cleared') {
+          if (result === 'done' || result === 'cleared') {
+            if (result === 'done') await removeFromQueue(item.id);
             processed++;
             progressed = true;
           } else if (result === 'blocked') {
             progressed = true;
           } else if (result === 'skip') {
-            /* aguarda outra rodada */
+            // No-op
           } else {
             const { permanentFailure } = await recordFailure(item.id);
             await markVistoriaErroSyncIfPermanent(item, permanentFailure);
@@ -568,8 +415,6 @@ export async function processQueue(): Promise<ProcessQueueResult> {
             progressed = true;
           }
         } catch (e) {
-          console.error("[sync] Erro detalhado:", e);
-          if (import.meta.env.DEV) console.log("[sync] Item com exceção:", item);
           const { permanentFailure } = await recordFailure(item.id, e);
           await markVistoriaErroSyncIfPermanent(item, permanentFailure, e);
           failed++;
@@ -589,35 +434,11 @@ export async function processQueue(): Promise<ProcessQueueResult> {
   const remainingActionable = queueSnapshot.filter((i) => isActionableItem(i, nowEnd)).length;
   const remainingFailed = queueSnapshot.filter((i) => isQueueItemPermanentFailure(i)).length;
   const remainingInBackoff = queueSnapshot.filter(
-    (i) =>
-      !isQueueItemPermanentFailure(i) &&
-      (i.retries ?? 0) > 0 &&
-      (i.retries ?? 0) < MAX_SYNC_RETRIES,
+    (i) => !isQueueItemPermanentFailure(i) && (i.retries ?? 0) > 0 && (i.retries ?? 0) < MAX_SYNC_RETRIES,
   ).length;
 
-  if (import.meta.env.DEV) {
-    console.log("[sync] processQueue resumo", {
-      durationMs: Date.now() - t0,
-      successRemovals: processed,
-      failureEvents: failed,
-      rounds,
-      remainingInBackoff,
-      remainingActionable,
-      remainingFailed,
-      totalInQueue: queueSnapshot.length,
-    });
-    console.log("[sync] Processados:", processed);
-    console.log("[sync] Falhas:", failed);
-  }
-
   const lifecycleDetail: SyncLifecycleDetail = {
-    processed,
-    failed,
-    skipped: false,
-    rounds,
-    remainingInBackoff,
-    remainingPending: remainingActionable,
-    remainingFailed,
+    processed, failed, skipped: false, rounds, remainingInBackoff, remainingPending: remainingActionable, remainingFailed,
   };
 
   if (hadSyncWork) {
@@ -633,23 +454,15 @@ export type EnqueueVistoriaResyncResult =
   | { ok: false; blocked: true; message: string }
   | { ok: false; message: string };
 
-/**
- * Recoloca vistoria na fila e processa (Histórico: retry para `erro_sync` / `pendente_sync`).
- * Não usa para `aguardando_ajuste` / `conflito_duplicidade` (exige correção manual).
- */
 export async function enqueueVistoriaResync(localVistoriaId: number): Promise<EnqueueVistoriaResyncResult> {
   let v = await getVistoriaById(localVistoriaId);
-  if (!v) {
-    return { ok: false, message: 'Vistoria não encontrada.' };
-  }
+  if (!v) return { ok: false, message: 'Vistoria não encontrada.' };
+  
   v = await ensureVistoriaLocalUuidIsUuid(v);
   const ns = normalizeVistoriaStatusSync(v.statusSync);
+  
   if (ns === 'aguardando_ajuste' || ns === 'conflito_duplicidade') {
-    return {
-      ok: false,
-      blocked: true,
-      message: 'Corrija placa ou número antes de sincronizar.',
-    };
+    return { ok: false, blocked: true, message: 'Corrija placa ou número antes de sincronizar.' };
   }
   if (v.pendingCloudDelete) {
     return { ok: false, message: 'Esta vistoria está marcada para exclusão.' };
@@ -659,23 +472,11 @@ export async function enqueueVistoriaResync(localVistoriaId: number): Promise<En
   }
 
   await removeVistoriaQueueItems(localVistoriaId);
-  await updateVistoria(localVistoriaId, {
-    statusSync: 'pendente_sync',
-    syncMessage: undefined,
-  });
+  await updateVistoria(localVistoriaId, { statusSync: 'pendente_sync', syncMessage: undefined });
+  
   const hasCloud = Boolean(v.cloudVistoriaId?.trim());
-  await addToQueue({
-    type: hasCloud ? 'update' : 'create',
-    entity: 'vistoria',
-    payload: { localVistoriaId },
-  });
-  if (import.meta.env.DEV) {
-    console.debug('[sync] enqueueVistoriaResync', {
-      localVistoriaId,
-      cloudVistoriaId: v.cloudVistoriaId,
-      operacaoFila: hasCloud ? 'update' : 'create',
-    });
-  }
+  await addToQueue({ type: hasCloud ? 'update' : 'create', entity: 'vistoria', payload: { localVistoriaId } });
+  
   await processQueue();
   return { ok: true };
 }

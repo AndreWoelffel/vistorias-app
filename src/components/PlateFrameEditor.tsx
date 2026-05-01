@@ -1,19 +1,27 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
-import { Check, RotateCcw } from 'lucide-react';
+import { Check, RotateCcw, Move } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-const FRAME_SIZE_VW = 78;
-const FRAME_MAX_PX = 320;
-const EXPORT_SIZE = 640;
+// Constantes para Placa (Retângulo)
+const PLATE_FRAME_VW = 78;
+const PLATE_FRAME_MAX_W = 320;
+const PLATE_FRAME_MAX_H = 320; // Agora é um quadrado perfeito
+const PLATE_EXPORT_W = 640;
+const PLATE_EXPORT_H = 640; // Ideal para a entrada do YOLO
+
+// Constantes para Adesivo (Quadrado 1:1)
+const STICKER_FRAME_VW = 78;
+const STICKER_FRAME_MAX_PX = 320;
+const STICKER_EXPORT_SIZE = 640;
 
 interface PlateFrameEditorProps {
   imageUrl: string;
-  imageBlob: Blob;
+  overlayType: 'plate' | 'number';
   onConfirm: (blob: Blob, dataUrl: string) => void;
   onCancel: () => void;
 }
 
-export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: PlateFrameEditorProps) {
+export function PlateFrameEditor({ imageUrl, overlayType, onConfirm, onCancel }: PlateFrameEditorProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const scaleRef = useRef(1);
@@ -47,33 +55,33 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
 
   const getFrameSize = useCallback(() => {
     const rect = getContainerRect();
-    const side = Math.min(rect.width * (FRAME_SIZE_VW / 100), FRAME_MAX_PX);
-    return { side, left: (rect.width - side) / 2, top: (rect.height - side) / 2 };
-  }, [getContainerRect]);
+    if (overlayType === 'number') {
+      const side = Math.min(rect.width * (STICKER_FRAME_VW / 100), STICKER_FRAME_MAX_PX);
+      return { w: side, h: side, left: (rect.width - side) / 2, top: (rect.height - side) / 2 };
+    } else {
+      const w = Math.min(rect.width * (PLATE_FRAME_VW / 100), PLATE_FRAME_MAX_W);
+      const h = w; // Força a proporção 1:1 baseada na largura
+      return { w, h, left: (rect.width - w) / 2, top: (rect.height - h) / 2 };
+    }
+  }, [getContainerRect, overlayType]);
 
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent) => {
-      if (e.pointerType === 'mouse' && e.button !== 0) return;
-      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-      setIsDragging(true);
-      setLastPointer({ x: e.clientX, y: e.clientY });
-      lastPinchRef.current = null;
-    },
-    []
-  );
+  const handlePointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    setIsDragging(true);
+    setLastPointer({ x: e.clientX, y: e.clientY });
+    lastPinchRef.current = null;
+  }, []);
 
-  const handlePointerMove = useCallback(
-    (e: React.PointerEvent) => {
-      if (!isDragging) return;
-      lastPinchRef.current = null;
-      const dx = e.clientX - lastPointer.x;
-      const dy = e.clientY - lastPointer.y;
-      setTranslateX((t) => t + dx);
-      setTranslateY((t) => t + dy);
-      setLastPointer({ x: e.clientX, y: e.clientY });
-    },
-    [isDragging, lastPointer]
-  );
+  const handlePointerMove = useCallback((e: React.PointerEvent) => {
+    if (!isDragging) return;
+    lastPinchRef.current = null;
+    const dx = e.clientX - lastPointer.x;
+    const dy = e.clientY - lastPointer.y;
+    setTranslateX((t) => t + dx);
+    setTranslateY((t) => t + dy);
+    setLastPointer({ x: e.clientX, y: e.clientY });
+  }, [isDragging, lastPointer]);
 
   const handlePointerUp = useCallback((e: React.PointerEvent) => {
     (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
@@ -81,26 +89,24 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
     lastPinchRef.current = null;
   }, []);
 
-  const handleTouchMove = useCallback(
-    (e: React.TouchEvent) => {
-      if (e.touches.length >= 2) {
-        e.preventDefault();
-        const t1 = e.touches[0];
-        const t2 = e.touches[1];
-        const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-        const prev = lastPinchRef.current;
-        if (prev !== null) {
-          const scaleFactor = dist / prev.dist;
-          const newScale = Math.max(0.3, Math.min(5, prev.scale * scaleFactor));
-          setScale(newScale);
-          lastPinchRef.current = { dist, scale: newScale };
-        }
-      } else {
-        lastPinchRef.current = null;
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (e.touches.length >= 2) {
+      // PERFEITO: Usando preventDefault sem ser passive
+      if (e.cancelable) e.preventDefault();
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+      const prev = lastPinchRef.current;
+      if (prev !== null) {
+        const scaleFactor = dist / prev.dist;
+        const newScale = Math.max(0.3, Math.min(5, prev.scale * scaleFactor));
+        setScale(newScale);
+        lastPinchRef.current = { dist, scale: newScale };
       }
-    },
-    []
-  );
+    } else {
+      lastPinchRef.current = null;
+    }
+  }, []);
 
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
     if (e.touches.length >= 2) {
@@ -113,22 +119,16 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
     }
   }, []);
 
-  const handleWheel = useCallback(
-    (e: React.WheelEvent) => {
-      e.preventDefault();
-      const rect = getContainerRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
-      const delta = e.deltaY > 0 ? -0.1 : 0.1;
-      const newScale = Math.max(0.3, Math.min(5, scale + delta));
-      setScale(newScale);
-    },
-    [scale, getContainerRect]
-  );
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    const newScale = Math.max(0.3, Math.min(5, scale + delta));
+    setScale(newScale);
+  }, [scale]);
 
   const exportCrop = useCallback(() => {
     const rect = getContainerRect();
-    const { side, left: frameLeft, top: frameTop } = getFrameSize();
+    const { w: frameW, h: frameH, left: frameLeft, top: frameTop } = getFrameSize();
     const nw = imgSize.w;
     const nh = imgSize.h;
     if (nw === 0 || nh === 0) return;
@@ -140,9 +140,9 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
 
     const frameCorners = [
       [frameLeft, frameTop],
-      [frameLeft + side, frameTop],
-      [frameLeft, frameTop + side],
-      [frameLeft + side, frameTop + side],
+      [frameLeft + frameW, frameTop],
+      [frameLeft, frameTop + frameH],
+      [frameLeft + frameW, frameTop + frameH],
     ] as const;
 
     const toImageCoords = (px: number, py: number) => {
@@ -161,21 +161,35 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
     const sh = maxY - minY;
     if (sw <= 0 || sh <= 0) return;
 
-    const minDim = Math.min(sw, sh);
-    const cx = minX + sw / 2;
-    const cy = minY + sh / 2;
-    const safeSx = Math.max(0, Math.min(nw - minDim, cx - minDim / 2));
-    const safeSy = Math.max(0, Math.min(nh - minDim, cy - minDim / 2));
-    const safeDim = minDim;
+    // Se for adesivo, forçamos o crop final a ser perfeitamente quadrado 1:1
+    let safeSx = minX;
+    let safeSy = minY;
+    let safeW = sw;
+    let safeH = sh;
+    
+    const targetExportW = overlayType === 'number' ? STICKER_EXPORT_SIZE : PLATE_EXPORT_W;
+    const targetExportH = overlayType === 'number' ? STICKER_EXPORT_SIZE : PLATE_EXPORT_H;
+
+    if (overlayType === 'number') {
+      const minDim = Math.min(sw, sh);
+      const cx = minX + sw / 2;
+      const cy = minY + sh / 2;
+      safeSx = Math.max(0, Math.min(nw - minDim, cx - minDim / 2));
+      safeSy = Math.max(0, Math.min(nh - minDim, cy - minDim / 2));
+      safeW = minDim;
+      safeH = minDim;
+    }
 
     const canvas = document.createElement('canvas');
-    canvas.width = EXPORT_SIZE;
-    canvas.height = EXPORT_SIZE;
+    canvas.width = targetExportW;
+    canvas.height = targetExportH;
     const ctx = canvas.getContext('2d')!;
 
     const img = new Image();
     img.onload = () => {
-      ctx.drawImage(img, safeSx, safeSy, safeDim, safeDim, 0, 0, EXPORT_SIZE, EXPORT_SIZE);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, safeSx, safeSy, safeW, safeH, 0, 0, targetExportW, targetExportH);
       canvas.toBlob(
         (blob) => {
           if (blob) onConfirm(blob, canvas.toDataURL('image/jpeg', 0.92));
@@ -185,7 +199,7 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
       );
     };
     img.src = imageUrl;
-  }, [getContainerRect, getFrameSize, imgSize, scale, translateX, translateY, imageUrl, onConfirm]);
+  }, [getContainerRect, getFrameSize, imgSize, scale, translateX, translateY, imageUrl, overlayType, onConfirm]);
 
   const handleReset = useCallback(() => {
     setScale(1);
@@ -197,15 +211,14 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
-      <div className="flex items-center justify-between p-2">
-        <h2 className="text-lg font-bold text-foreground">Enquadrar placa</h2>
+      <div className="flex items-center justify-between p-3 border-b border-border/50 bg-card">
+        <h2 className="text-lg font-bold text-foreground">
+          {overlayType === 'number' ? 'Enquadrar Adesivo' : 'Enquadrar Placa'}
+        </h2>
         <div className="flex gap-2">
-          <Button variant="ghost" size="sm" onClick={handleReset}>
-            <RotateCcw className="h-4 w-4 mr-1" />
+          <Button variant="ghost" size="sm" onClick={handleReset} className="text-xs font-semibold text-muted-foreground">
+            <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
             Redefinir
-          </Button>
-          <Button variant="ghost" size="icon" onClick={onCancel}>
-            ✕
           </Button>
         </div>
       </div>
@@ -240,32 +253,31 @@ export function PlateFrameEditor({ imageUrl, imageBlob, onConfirm, onCancel }: P
           />
         </div>
 
-        <div
-          className="absolute inset-0 flex items-center justify-center pointer-events-none"
-          aria-hidden
-        >
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none" aria-hidden>
           <div
-            className="plate-frame-mira border-2 border-green-500 rounded-lg bg-green-500/10"
+            className={`border-2 border-primary rounded-lg bg-primary/10 shadow-[0_0_0_9999px_rgba(0,0,0,0.7)] transition-all`}
             style={{
-              width: `min(${FRAME_SIZE_VW}vw, ${FRAME_MAX_PX}px)`,
-              aspectRatio: '1',
-              boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.65)',
+              width: overlayType === 'number' ? `min(${STICKER_FRAME_VW}vw, ${STICKER_FRAME_MAX_PX}px)` : `min(${PLATE_FRAME_VW}vw, ${PLATE_FRAME_MAX_W}px)`,
+              height: overlayType === 'number' ? `min(${STICKER_FRAME_VW}vw, ${STICKER_FRAME_MAX_PX}px)` : `${PLATE_FRAME_MAX_H}px`,
             }}
           />
         </div>
 
-        <p className="absolute bottom-20 left-0 right-0 text-center text-sm text-white/90 pointer-events-none">
-          Arraste e use zoom para encaixar a placa no quadrado verde. Depois toque em Enviar.
-        </p>
+        <div className="absolute bottom-16 left-0 right-0 flex justify-center pointer-events-none">
+          <p className="bg-black/60 px-4 py-2 rounded-full text-xs font-medium text-white flex items-center gap-2 backdrop-blur-sm">
+            <Move className="h-3.5 w-3.5" />
+            Arraste e use o movimento de pinça (zoom) para encaixar
+          </p>
+        </div>
       </div>
 
-      <div className="flex gap-3 p-4">
-        <Button variant="secondary" className="flex-1 h-14 text-base" onClick={onCancel}>
-          Voltar
+      <div className="flex gap-3 p-4 bg-card border-t border-border/50 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        <Button variant="outline" className="flex-1 h-14 text-base font-semibold rounded-xl" onClick={onCancel}>
+          Cancelar
         </Button>
-        <Button className="flex-1 h-14 text-base font-bold" onClick={exportCrop}>
+        <Button className="flex-1 h-14 text-base font-bold rounded-xl shadow-md" onClick={exportCrop}>
           <Check className="mr-2 h-5 w-5" />
-          Enviar
+          Usar esta foto
         </Button>
       </div>
     </div>

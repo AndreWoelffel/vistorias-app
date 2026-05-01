@@ -1,17 +1,18 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { Search, Calendar, Download, Loader2, ChevronRight, RefreshCw } from 'lucide-react';
+import { Search, Calendar, Download, Loader2, ChevronRight, RefreshCw, CloudDownload } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { AppHeader } from '@/components/AppHeader';
 import { SyncBadge } from '@/components/SyncBadge';
+import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { useVistorias } from '@/hooks/useVistorias';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
 import { isVistoriaSyncBlockedByDuplicate, normalizeVistoriaStatusSync, type Vistoria } from '@/lib/db';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
 import { toast } from '@/hooks/use-toast';
-import { enqueueVistoriaResync } from '@/services/syncService';
+import { enqueueVistoriaResync, processQueue, type EnqueueVistoriaResyncResult } from '@/services/syncService';
 
 function statusLabelForExport(v: Vistoria): string {
   const n = normalizeVistoriaStatusSync(v.statusSync);
@@ -37,11 +38,15 @@ export default function HistoryPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const focusVistoriaId = (location.state as { focusVistoriaId?: number } | null)?.focusVistoriaId;
-  const { vistorias, loading } = useVistorias(ready ? id : null);
+  const { vistorias, loading, refresh } = useVistorias(ready ? id : null);
+  
+  const online = useOnlineStatus();
+
   const [search, setSearch] = useState('');
   const [todayOnly, setTodayOnly] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [resyncingId, setResyncingId] = useState<number | null>(null);
+  const [pullingFromCloud, setPullingFromCloud] = useState(false);
 
   const filtered = useMemo(() => {
     const list = vistorias ?? [];
@@ -49,11 +54,14 @@ export default function HistoryPage() {
     if (todayOnly) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-      result = result.filter((v) => new Date(v.createdAt) >= today);
+      result = result.filter((v) => v.createdAt && new Date(v.createdAt) >= today);
     }
     if (search) {
       const q = search.toUpperCase();
-      result = result.filter((v) => v.placa.includes(q) || v.numeroVistoria.includes(q));
+      result = result.filter((v) => 
+        (v.placa && v.placa.includes(q)) || 
+        (v.numeroVistoria && v.numeroVistoria.includes(q))
+      );
     }
     return result;
   }, [vistorias, search, todayOnly]);
@@ -73,25 +81,34 @@ export default function HistoryPage() {
     try {
       const r = await enqueueVistoriaResync(v.id);
       if (r.ok) {
-        toast({
-          title: 'Sincronização iniciada',
-          description: 'Tentando enviar novamente.',
-        });
-      } else if ('blocked' in r && r.blocked) {
-        toast({
-          title: 'Não é possível sincronizar agora',
-          description: r.message,
-          variant: 'destructive',
-        });
+        toast({ title: 'Sincronização iniciada', description: 'Tentando enviar novamente.' });
       } else {
-        toast({
-          title: 'Não foi possível',
-          description: r.message,
-          variant: 'destructive',
-        });
+        const err = r as Extract<EnqueueVistoriaResyncResult, { ok: false }>;
+        if ('blocked' in err && err.blocked) {
+          toast({ title: 'Não é possível sincronizar agora', description: err.message, variant: 'destructive' });
+        } else {
+          toast({ title: 'Não foi possível', description: err.message, variant: 'destructive' });
+        }
       }
     } finally {
       setResyncingId(null);
+    }
+  };
+
+  const handlePullFromCloud = async () => {
+    if (!online) {
+      toast({ title: "Sem conexão", description: "Conecte-se à internet para baixar dados do Supabase.", variant: "destructive" });
+      return;
+    }
+    setPullingFromCloud(true);
+    try {
+      await processQueue(); 
+      await refresh();
+      toast({ title: "Sincronização concluída", description: "O histórico local foi atualizado com a nuvem." });
+    } catch (e) {
+      toast({ title: "Erro de Sincronização", description: "Não foi possível baixar os dados do Supabase.", variant: "destructive" });
+    } finally {
+      setPullingFromCloud(false);
     }
   };
 
@@ -103,8 +120,8 @@ export default function HistoryPage() {
         Vistoriador: v.vistoriador || '-',
         'Criado por': v.createdBy || '-',
         'Leilão': `Leilão ${id}`,
-        Placa: v.placa,
-        'Nº Vistoria': v.numeroVistoria,
+        Placa: v.placa || '-',
+        'Nº Vistoria': v.numeroVistoria || '-',
         Fotos: v.fotos?.length || 0,
         Status: statusLabelForExport(v),
       }));
@@ -117,6 +134,7 @@ export default function HistoryPage() {
       XLSX.writeFile(wb, `vistorias_leilao_${id}_${new Date().toISOString().slice(0,10)}.xlsx`);
     } catch (err) {
       console.error(err);
+      toast({ title: "Erro na exportação", description: "Não foi possível gerar a planilha.", variant: "destructive" });
     } finally {
       setExporting(false);
     }
@@ -128,7 +146,7 @@ export default function HistoryPage() {
         <AppHeader title="Histórico" showBack onBack={() => navigate('/')} />
         <div className="flex flex-1 flex-col items-center justify-center gap-2">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
-          <p className="text-sm text-muted-foreground">Carregando…</p>
+          <p className="text-sm text-muted-foreground font-medium">Carregando…</p>
         </div>
       </div>
     );
@@ -138,71 +156,83 @@ export default function HistoryPage() {
     <div className="flex min-h-screen flex-col bg-background">
       <AppHeader title="Histórico" showBack />
 
-      <div className="space-y-3 px-4 pt-3 pb-2">
-        <p className="text-[11px] leading-snug text-muted-foreground px-0.5">
-          Vistorias deste leilão: atualizadas do servidor quando há internet; sem rede, mostramos o que está
-          salvo neste aparelho (incluindo alterações pendentes).
+      <div className="space-y-4 px-4 pt-4 pb-2">
+        <p className="text-xs font-medium leading-snug text-muted-foreground/80">
+          Vistorias deste leilão salvas neste aparelho. Conecte-se à internet para sincronizar alterações com a nuvem.
         </p>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <div className="relative min-w-0 flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
             <Input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Buscar por placa ou número"
-              className="h-12 pl-10 text-base"
+              className="h-12 pl-10 text-base font-medium shadow-sm bg-card"
               enterKeyHint="search"
             />
           </div>
           <Button
             type="button"
             variant="outline"
-            size="sm"
-            className="h-10 shrink-0 rounded-lg border-muted-foreground/30 px-3 text-xs font-medium text-muted-foreground hover:bg-muted/60 sm:self-center"
+            className="h-12 shrink-0 rounded-xl border-border/80 px-4 text-sm font-bold text-foreground hover:bg-secondary/60 shadow-sm"
             onClick={() => navigate(`/duplicidades/${id}`)}
           >
             Tratar duplicidades
           </Button>
         </div>
-        <div className="flex items-center gap-2">
+
+        <div className="flex items-center gap-2 border-b border-border/50 pb-3">
           <Button
             type="button"
-            variant={todayOnly ? 'default' : 'ghost'}
+            variant={todayOnly ? 'default' : 'secondary'}
             size="sm"
             onClick={() => setTodayOnly(!todayOnly)}
-            className="h-10 gap-1.5 px-3 text-sm"
+            className={cn("h-9 gap-1.5 px-3 text-xs font-bold rounded-lg transition-colors", todayOnly && "shadow-md")}
           >
-            <Calendar className="h-4 w-4" />
+            <Calendar className="h-3.5 w-3.5" />
             {todayOnly ? 'Só hoje' : 'Todas as datas'}
           </Button>
-          <span className="text-xs text-muted-foreground">{filtered.length} itens</span>
+          <span className="text-xs font-semibold text-muted-foreground bg-muted/40 px-2 py-1 rounded-md">
+            {filtered.length} {filtered.length === 1 ? 'item' : 'itens'}
+          </span>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             onClick={exportExcel}
             disabled={exporting || filtered.length === 0}
-            className="ml-auto h-10 gap-1.5 px-3 text-sm"
+            className="ml-auto h-9 gap-1.5 px-3 text-xs font-bold hover:bg-secondary/80"
           >
-            {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-            Planilha
+            {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            Exportar Planilha
           </Button>
         </div>
       </div>
 
-      <div className="flex-1 px-4 pb-4">
+      <div className="flex-1 px-4 pb-6 pt-2">
         {loading ? (
-          <div className="flex flex-col items-center justify-center py-16 gap-2">
+          <div className="flex flex-col items-center justify-center py-20 gap-3">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">Carregando lista…</p>
+            <p className="text-sm font-medium text-muted-foreground">Lendo banco de dados local…</p>
           </div>
         ) : filtered.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-border bg-muted/20 px-6 py-14 text-center">
-            <p className="text-base font-semibold text-foreground">Nada encontrado</p>
-            <p className="mt-1 text-sm text-muted-foreground">Troque o filtro ou faça uma nova vistoria.</p>
+          <div className="rounded-2xl border border-dashed border-border/80 bg-card px-6 py-16 text-center shadow-sm">
+            <p className="text-lg font-black text-foreground">O histórico local está vazio</p>
+            <p className="mt-2 text-sm font-medium text-muted-foreground">
+              Troque o filtro, faça uma nova vistoria, ou puxe os dados do servidor.
+            </p>
+            <Button 
+              className="mt-6 font-bold shadow-md" 
+              onClick={handlePullFromCloud}
+              disabled={pullingFromCloud}
+            >
+              {pullingFromCloud ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CloudDownload className="mr-2 h-4 w-4" />}
+              Baixar do Supabase
+            </Button>
           </div>
         ) : (
-          <ul className="flex flex-col gap-2">
+          <ul className="flex flex-col gap-3">
             {(filtered ?? []).map((v) => {
               const rowSt = normalizeVistoriaStatusSync(v.statusSync);
               const showResync = rowSt === 'erro_sync' || rowSt === 'pendente_sync';
@@ -213,33 +243,30 @@ export default function HistoryPage() {
                   id={v.id != null ? `vistoria-${v.id}` : undefined}
                   onClick={() => navigate(`/editar/${v.id}`)}
                   className={cn(
-                    'flex w-full min-h-[60px] items-center gap-3 rounded-2xl border px-4 py-3 text-left transition active:scale-[0.99]',
-                    'shadow-sm hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+                    'flex w-full min-h-[72px] items-center gap-3 rounded-2xl border px-4 py-4 text-left transition-all active:scale-[0.98]',
+                    'shadow-sm hover:shadow-md hover:border-primary/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
                     isVistoriaSyncBlockedByDuplicate(v.statusSync)
-                      ? 'border-orange-400/50 bg-orange-500/10'
-                      : 'border-border bg-card',
+                      ? 'border-orange-500/40 bg-orange-500/5'
+                      : 'border-border/80 bg-card',
                   )}
                 >
-                  <div className="min-w-0 flex-1 space-y-1">
+                  <div className="min-w-0 flex-1 space-y-1.5">
                     <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0">
-                      <span className="text-lg font-black tracking-wider text-foreground">{v.placa}</span>
-                      <span className="text-sm tabular-nums text-muted-foreground">#{v.numeroVistoria}</span>
+                      <span className="text-xl font-black tracking-widest text-foreground uppercase">{v.placa}</span>
+                      <span className="text-sm font-bold text-muted-foreground/70">#{v.numeroVistoria}</span>
                     </div>
-                    <div className="flex flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-                      <span>
+                    <div className="flex flex-wrap items-center gap-x-2 text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
+                      <span className="bg-muted/40 px-1.5 py-0.5 rounded text-foreground/80">
                         {new Date(v.createdAt).toLocaleString('pt-BR', {
-                          day: '2-digit',
-                          month: '2-digit',
-                          hour: '2-digit',
-                          minute: '2-digit',
+                          day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
                         })}
                       </span>
                       {v.vistoriador ? <span>· {v.vistoriador}</span> : null}
-                      <span>· {v.fotos?.length || 0} foto(s)</span>
+                      <span>· {v.fotos?.length || 0} FOTOS</span>
                     </div>
                   </div>
-                  <div className="flex shrink-0 flex-col items-end gap-1.5 sm:flex-row sm:items-center">
-                    <div className="flex flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-2">
+                  <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
+                    <div className="flex flex-col items-end gap-1.5 sm:flex-row sm:items-center sm:gap-2">
                       <SyncBadge
                         status={v.statusSync}
                         fotoUploadFailed={v.fotoUploadFailed}
@@ -248,22 +275,22 @@ export default function HistoryPage() {
                       {showResync && v.id != null ? (
                         <Button
                           type="button"
-                          variant="outline"
+                          variant="secondary"
                           size="sm"
-                          className="h-8 gap-1 px-2.5 text-xs font-medium"
+                          className="h-8 gap-1.5 px-3 text-[11px] font-bold shadow-sm"
                           disabled={resyncingId === v.id}
                           onClick={(e) => handleResync(e, v)}
                         >
                           {resyncingId === v.id ? (
-                            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                            <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden />
                           ) : (
-                            <RefreshCw className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                            <RefreshCw className="h-3 w-3 shrink-0" aria-hidden />
                           )}
                           Sincronizar
                         </Button>
                       ) : null}
                     </div>
-                    <ChevronRight className="h-5 w-5 text-muted-foreground max-sm:hidden" aria-hidden />
+                    <ChevronRight className="h-5 w-5 text-muted-foreground/50 max-sm:hidden" aria-hidden />
                   </div>
                 </button>
               </li>

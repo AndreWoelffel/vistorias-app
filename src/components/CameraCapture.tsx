@@ -1,7 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { Camera, X, RotateCcw, Check, ImagePlus, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { GalleryCrop } from '@/components/GalleryCrop';
 import { PlateFrameEditor } from '@/components/PlateFrameEditor';
 
 interface CameraCaptureProps {
@@ -9,23 +8,25 @@ interface CameraCaptureProps {
   onMultiCapture?: (blobs: Blob[]) => void;
   onCancel: () => void;
   overlayType?: 'plate' | 'number' | 'none';
-  /** '1:1' = quadrado (adesivo); 'free' = retângulo livre (placa/número antigo) */
-  cropAspectRatio?: '1:1' | 'free';
   title: string;
   multiFrame?: boolean;
 }
 
-export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType = 'none', cropAspectRatio, title, multiFrame = false }: CameraCaptureProps) {
+export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType = 'none', title, multiFrame = false }: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
-  const [captured, setCaptured] = useState<string | null>(null);
-  const [capturedBlob, setCapturedBlob] = useState<Blob | null>(null);
+  
+  // A foto inteira (crua) recém tirada da câmera ou galeria (ainda sem crop)
+  const [rawImageUrl, setRawImageUrl] = useState<string | null>(null);
+  
+  // A foto processada final (quando não precisa de crop, ex: fotos extras do carro)
+  const [capturedFinal, setCapturedFinal] = useState<string | null>(null);
+  const [capturedFinalBlob, setCapturedFinalBlob] = useState<Blob | null>(null);
+  
   const [multiFrameProgress, setMultiFrameProgress] = useState<number>(0);
   const [isCapturingMulti, setIsCapturingMulti] = useState(false);
-  const [galleryCropUrl, setGalleryCropUrl] = useState<string | null>(null);
-  const [galleryCropBlob, setGalleryCropBlob] = useState<Blob | null>(null);
 
   const startCamera = useCallback(async () => {
     try {
@@ -51,7 +52,14 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
     return () => {
       stream?.getTracks().forEach((t) => t.stop());
     };
-  }, []);
+  }, [startCamera, stream]);
+
+  // Limpeza de memória
+  useEffect(() => {
+    return () => {
+      if (rawImageUrl) URL.revokeObjectURL(rawImageUrl);
+    };
+  }, [rawImageUrl]);
 
   const captureFrame = (): Promise<{ blob: Blob; dataUrl: string } | null> => {
     return new Promise((resolve) => {
@@ -73,36 +81,44 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
     });
   };
 
-  const capture = async () => {
-    if (multiFrame && onMultiCapture) {
-      // Multi-frame: capture 3 rapid frames with ~300ms interval
-      setIsCapturingMulti(true);
-      const blobs: Blob[] = [];
-      for (let i = 0; i < 3; i++) {
-        setMultiFrameProgress(i + 1);
-        const result = await captureFrame();
-        if (result) {
-          blobs.push(result.blob);
-          if (i === 0) {
-            setCaptured(result.dataUrl);
-          }
-        }
-        if (i < 2) await new Promise(r => setTimeout(r, 300));
-      }
-      setIsCapturingMulti(false);
+  const captureSingleOrRouteToCrop = async () => {
+    const result = await captureFrame();
+    if (result) {
       stopCamera();
-      if (blobs.length > 0) {
-        setCapturedBlob(blobs[0]);
-        onMultiCapture(blobs);
-      }
-    } else {
-      const result = await captureFrame();
-      if (result) {
-        setCapturedBlob(result.blob);
-        setCaptured(result.dataUrl);
-        stopCamera();
+      
+      if (overlayType === 'none') {
+        // Foto livre (Carro), não precisa de crop manual, vai direto pra visualização final
+        setCapturedFinalBlob(result.blob);
+        setCapturedFinal(result.dataUrl);
+      } else {
+        // Placa ou Adesivo: abre a tela de corte interativo (PlateFrameEditor)
+        setRawImageUrl(result.dataUrl);
       }
     }
+  };
+
+  const captureMulti = async () => {
+    if (!onMultiCapture) return;
+    setIsCapturingMulti(true);
+    const blobs: Blob[] = [];
+    for (let i = 0; i < 3; i++) {
+      setMultiFrameProgress(i + 1);
+      const result = await captureFrame();
+      if (result) {
+        blobs.push(result.blob);
+      }
+      if (i < 2) await new Promise(r => setTimeout(r, 300));
+    }
+    setIsCapturingMulti(false);
+    stopCamera();
+    if (blobs.length > 0) {
+      onMultiCapture(blobs); // Multi-frame não passa por crop manual, o YOLO/ALPR se vira
+    }
+  };
+
+  const capture = () => {
+    if (multiFrame) captureMulti();
+    else captureSingleOrRouteToCrop();
   };
 
   const handleGallery = () => {
@@ -114,87 +130,49 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
     if (!file) return;
     stopCamera();
 
-    // Placa: bypass crop — YOLO detecta a placa no contexto inteiro; envio direto preserva aspect ratio
-    if (overlayType === 'plate') {
-      const url = URL.createObjectURL(file);
-      setCaptured(url);
-      setCapturedBlob(file);
-      return;
+    const url = URL.createObjectURL(file);
+    
+    if (overlayType === 'none') {
+      // Foto Livre
+      setCapturedFinal(url);
+      setCapturedFinalBlob(file);
+    } else {
+      // Placa ou Adesivo: Manda para o editor de corte
+      setRawImageUrl(url);
     }
-
-    // Número: mostrar modal de recorte para enquadrar o código
-    if (overlayType === 'number') {
-      const url = URL.createObjectURL(file);
-      setGalleryCropUrl(url);
-      setGalleryCropBlob(file);
-      return;
-    }
-
-    // For 'none' overlay (regular photos), skip crop
-    const reader = new FileReader();
-    reader.onload = () => {
-      setCaptured(reader.result as string);
-      setCapturedBlob(file);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleCropConfirm = (croppedBlob: Blob) => {
-    const url = URL.createObjectURL(croppedBlob);
-    setCaptured(url);
-    setCapturedBlob(croppedBlob);
-    if (galleryCropUrl) URL.revokeObjectURL(galleryCropUrl);
-    setGalleryCropUrl(null);
-    setGalleryCropBlob(null);
-  };
-
-  const handleCropCancel = () => {
-    if (galleryCropUrl) URL.revokeObjectURL(galleryCropUrl);
-    setGalleryCropUrl(null);
-    setGalleryCropBlob(null);
-    startCamera();
   };
 
   const retake = () => {
-    setCaptured(null);
-    setCapturedBlob(null);
+    setCapturedFinal(null);
+    setCapturedFinalBlob(null);
+    if (rawImageUrl) URL.revokeObjectURL(rawImageUrl);
+    setRawImageUrl(null);
     setMultiFrameProgress(0);
     startCamera();
   };
 
-  const confirm = () => {
-    if (capturedBlob && captured) {
-      onCapture(capturedBlob, captured);
+  const confirmFinal = () => {
+    if (capturedFinalBlob && capturedFinal) {
+      onCapture(capturedFinalBlob, capturedFinal);
     }
   };
 
-  if (galleryCropUrl && overlayType === 'number') {
-    return (
-      <GalleryCrop
-        imageUrl={galleryCropUrl}
-        imageBlob={galleryCropBlob!}
-        overlayType={overlayType}
-        cropAspectRatio={cropAspectRatio ?? '1:1'}
-        onConfirm={handleCropConfirm}
-        onCancel={handleCropCancel}
-      />
-    );
-  }
-
-  if (overlayType === 'plate' && captured && capturedBlob) {
+  // 1. SE TEM IMAGEM CRUA DE PLACA/ADESIVO, MOSTRA O EDITOR DE CORTE UNIFICADO
+  if (rawImageUrl && (overlayType === 'plate' || overlayType === 'number')) {
     return (
       <PlateFrameEditor
-        imageUrl={captured}
-        imageBlob={capturedBlob}
+        imageUrl={rawImageUrl}
+        overlayType={overlayType}
         onConfirm={(blob, dataUrl) => onCapture(blob, dataUrl)}
         onCancel={retake}
       />
     );
   }
 
+  // 2. TELA DA CÂMERA OU DE VISUALIZAÇÃO FINAL (Para fotos livres)
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
-      <div className="flex items-center justify-between p-4">
+      <div className="flex items-center justify-between p-4 border-b border-border/50 bg-card">
         <h2 className="text-lg font-bold text-foreground">{title}</h2>
         <Button variant="ghost" size="icon" onClick={() => { stopCamera(); onCancel(); }}>
           <X className="h-6 w-6" />
@@ -202,46 +180,52 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
       </div>
 
       <div className="relative flex-1 overflow-hidden bg-black">
-        {!captured ? (
+        {!capturedFinal ? (
           <>
             <video ref={videoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
+            
+            {/* Guias Visuais (Apenas dicas, já que o Crop será manual depois) */}
             {overlayType === 'plate' && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="camera-overlay w-[78vw] max-w-[420px] aspect-square" />
-                <div className="absolute bottom-32 left-0 right-0 text-center space-y-1">
-                  <p className="text-sm font-medium text-foreground/80">Enquadre a placa no quadrado</p>
-                  <p className="text-xs text-muted-foreground/80">Será usado o recorte central 1:1 (640×640)</p>
+                <div className="border-2 border-white/50 border-dashed rounded-lg w-[78vw] max-w-[320px] aspect-square" />
+                <div className="absolute bottom-28 left-0 right-0 text-center space-y-1 bg-black/40 py-2">
+                  <p className="text-sm font-medium text-white">Centralize a Placa</p>
+                  <p className="text-[10px] text-white/70">Você poderá ajustar o corte na próxima tela</p>
                 </div>
               </div>
             )}
+            
             {overlayType === 'number' && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="camera-overlay w-[78vw] max-w-[420px] aspect-square" />
-                <div className="absolute bottom-32 left-0 right-0 text-center space-y-1">
-                  <p className="text-sm font-medium text-foreground/80">Enquadre o adesivo no quadrado</p>
-                  <p className="text-xs text-muted-foreground/80">Será usado crop 1:1 para o YOLO do adesivo</p>
+                <div className="border-2 border-white/50 border-dashed rounded-lg w-[78vw] max-w-[320px] aspect-square" />
+                <div className="absolute bottom-28 left-0 right-0 text-center space-y-1 bg-black/40 py-2">
+                  <p className="text-sm font-medium text-white">Centralize o Adesivo</p>
+                  <p className="text-[10px] text-white/70">Você poderá ajustar o corte na próxima tela</p>
                 </div>
               </div>
             )}
+
             {overlayType !== 'none' && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                <div className="h-0.5 w-[78vw] max-w-[420px] bg-accent/60 animate-scan-line" />
+                <div className="h-0.5 w-[78vw] max-w-[320px] bg-primary/60 animate-scan-line" />
               </div>
             )}
+
             {isCapturingMulti && (
-              <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-                <div className="flex flex-col items-center gap-2 rounded-xl bg-card/90 px-6 py-4">
-                  <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                  <p className="text-sm font-bold text-foreground">Capturando frame {multiFrameProgress}/3</p>
+              <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm z-10">
+                <div className="flex flex-col items-center gap-3 rounded-2xl bg-card p-6 shadow-2xl">
+                  <Loader2 className="h-10 w-10 animate-spin text-primary" />
+                  <p className="text-sm font-bold text-foreground tracking-wide">LENDO FRAME {multiFrameProgress}/3</p>
                 </div>
               </div>
             )}
           </>
         ) : (
           <div className="relative h-full w-full flex items-center justify-center bg-black">
-            <img src={captured} alt="Captura" className="max-h-full max-w-full object-contain" />
+            <img src={capturedFinal} alt="Captura Final" className="max-h-full max-w-full object-contain" />
           </div>
         )}
+        
         <canvas ref={canvasRef} className="hidden" />
         <input
           ref={fileInputRef}
@@ -252,27 +236,27 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
         />
       </div>
 
-      <div className="flex gap-3 p-4">
-        {!captured ? (
+      <div className="flex gap-3 p-4 bg-card border-t border-border/50 pb-[max(1rem,env(safe-area-inset-bottom))]">
+        {!capturedFinal ? (
           <>
-            <Button variant="secondary" className="flex-1 h-14 text-base font-semibold" onClick={handleGallery}>
+            <Button variant="secondary" className="flex-1 h-16 text-base font-semibold rounded-xl" onClick={handleGallery}>
               <ImagePlus className="mr-2 h-5 w-5" />
               Galeria
             </Button>
-            <Button className="flex-1 h-14 text-base font-bold" onClick={capture} disabled={isCapturingMulti}>
-              <Camera className="mr-2 h-5 w-5" />
+            <Button className="flex-1 h-16 text-base font-bold rounded-xl shadow-md" onClick={capture} disabled={isCapturingMulti}>
+              <Camera className="mr-2 h-6 w-6" />
               {multiFrame ? 'ALPR (3x)' : 'Capturar'}
             </Button>
           </>
         ) : (
           <>
-            <Button variant="secondary" className="flex-1 h-14 text-base" onClick={retake}>
+            <Button variant="outline" className="flex-1 h-14 text-base font-semibold rounded-xl" onClick={retake}>
               <RotateCcw className="mr-2 h-5 w-5" />
-              Refazer
+              Tirar Outra
             </Button>
-            <Button className="flex-1 h-14 text-base font-bold" onClick={confirm}>
+            <Button className="flex-1 h-14 text-base font-bold rounded-xl shadow-md" onClick={confirmFinal}>
               <Check className="mr-2 h-5 w-5" />
-              Confirmar
+              Confirmar Foto
             </Button>
           </>
         )}

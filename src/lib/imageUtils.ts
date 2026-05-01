@@ -5,6 +5,9 @@
  */
 
 import * as tf from '@tensorflow/tfjs';
+// Backend super-rápido para CPU caso o celular não suporte WebGL (Placa de vídeo)
+import '@tensorflow/tfjs-backend-wasm';
+import { setWasmPaths } from '@tensorflow/tfjs-backend-wasm';
 
 const CHAR_CLASSES = [
   '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -20,14 +23,30 @@ const YOLO_INPUT_SIZE = 640;
 const YOLO_CHAR_CLASS_INDEX = 0;   // 0: Caractere, 1: Placa
 const YOLO_MIN_CONF = 0.40;
 
-// Ensure WebGL backend for GPU acceleration
+// Configuração robusta de Backend (WebGL -> WASM -> CPU)
 let tfReady: Promise<void> | null = null;
 function ensureTF(): Promise<void> {
   if (!tfReady) {
-    tfReady = tf.setBackend('webgl').then(() => tf.ready()).catch(() => {
-      console.warn('WebGL not available, falling back to CPU');
-      return tf.setBackend('cpu').then(() => tf.ready());
-    });
+    tfReady = (async () => {
+      try {
+        await tf.setBackend('webgl');
+        await tf.ready();
+        console.log('[ALPR] Motor da IA ativado com sucesso: WebGL (GPU)');
+      } catch (e1) {
+        console.warn('[ALPR] WebGL indisponível no dispositivo, tentando WASM...', e1);
+        try {
+          // Usa o CDN global para os binários do WASM (não pesa o seu build final)
+          setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm/dist/');
+          await tf.setBackend('wasm');
+          await tf.ready();
+          console.log('[ALPR] Motor da IA ativado com sucesso: WASM (Alta Performance CPU)');
+        } catch (e2) {
+          console.warn('[ALPR] WASM falhou. Entrando em modo segurança: CPU puro (Mais Lento)...', e2);
+          await tf.setBackend('cpu');
+          await tf.ready();
+        }
+      }
+    })();
   }
   return tfReady;
 }
@@ -36,24 +55,18 @@ let yoloModelPromise: Promise<tf.GraphModel | tf.LayersModel | null> | null = nu
 let yoloVistoriasModelPromise: Promise<tf.GraphModel | tf.LayersModel | null> | null = null;
 let cnnModelPromise: Promise<tf.GraphModel | null> | null = null;
 
-/** Carrega o detector YOLO (Caractere + Placa). Chamar no mount ou antes do primeiro OCR de placa. */
 export async function loadYOLOModel(): Promise<tf.GraphModel | tf.LayersModel | null> {
   await ensureTF();
   if (!yoloModelPromise) {
     yoloModelPromise = (async () => {
       try {
-        console.log('[ALPR YOLO] Tentando carregar YOLO como GraphModel...');
         const g = await tf.loadGraphModel('/model_yolo_placas/model.json');
-        console.log('[ALPR YOLO] Sucesso ao carregar YOLO placas como GraphModel');
         return g;
       } catch (e1) {
-        console.warn('[ALPR YOLO] Falha ao carregar GraphModel, tentando LayersModel...', e1);
         try {
-          const l = await tf.loadLayersModel('/model_yolo_placas/model.json');
-          console.log('[ALPR YOLO] Sucesso ao carregar YOLO como LayersModel');
-          return l;
+          return await tf.loadLayersModel('/model_yolo_placas/model.json');
         } catch (e2) {
-          console.error('[ALPR YOLO] Falha total ao carregar o modelo YOLOv8', e2);
+          console.error('[ALPR YOLO] Falha ao carregar o modelo de placa', e2);
           return null;
         }
       }
@@ -62,22 +75,18 @@ export async function loadYOLOModel(): Promise<tf.GraphModel | tf.LayersModel | 
   return yoloModelPromise;
 }
 
-/** Carrega o detector YOLO de adesivos de vistoria (public/model_yolo_vistorias/). */
 export async function loadYOLOVistoriasModel(): Promise<tf.GraphModel | tf.LayersModel | null> {
   await ensureTF();
   if (!yoloVistoriasModelPromise) {
     yoloVistoriasModelPromise = (async () => {
       try {
         const g = await tf.loadGraphModel('/model_yolo_vistorias/model.json');
-        console.log('[YOLO Vistorias] Modelo carregado');
         return g;
       } catch (e1) {
         try {
-          const l = await tf.loadLayersModel('/model_yolo_vistorias/model.json');
-          console.log('[YOLO Vistorias] Modelo carregado (LayersModel)');
-          return l;
+          return await tf.loadLayersModel('/model_yolo_vistorias/model.json');
         } catch (e2) {
-          console.error('[YOLO Vistorias] Falha ao carregar', e2);
+          console.error('[YOLO Vistorias] Falha ao carregar o modelo de adesivo', e2);
           return null;
         }
       }
@@ -86,28 +95,63 @@ export async function loadYOLOVistoriasModel(): Promise<tf.GraphModel | tf.Layer
   return yoloVistoriasModelPromise;
 }
 
-/** Carrega o classificador CNN como GraphModel (export nativo TF). */
 export async function loadCNNModel(): Promise<tf.GraphModel | null> {
   await ensureTF();
   if (!cnnModelPromise) {
     cnnModelPromise = (async () => {
       try {
-        console.log('[ALPR CNN] Tentando carregar CNN como GraphModel...');
         const model = await tf.loadGraphModel('/model_cnn/model.json');
-        console.log('[ALPR CNN] Sucesso absoluto ao carregar CNN como GraphModel!');
         return model;
       } catch (e) {
-        console.error('[ALPR CNN] Falha total ao carregar a CNN', e);
+        console.error('[ALPR CNN] Falha ao carregar a CNN', e);
         return null;
       }
     })();
   }
   return cnnModelPromise;
 }
-/** Pré-carrega ambos os modelos (chamar no mount do componente de câmera/placa). */
-export function preloadAlprModels(): void {
-  loadYOLOModel();
-  loadCNNModel();
+
+/** * Pré-carrega E aquece (Warm-up) os modelos. 
+ * Passar um tensor vazio obriga a GPU a compilar as rotinas antes de o usuário tirar a foto.
+ */
+export async function preloadAlprModels(): Promise<void> {
+  try {
+    const [yolo, yoloAdesivo, cnn] = await Promise.all([
+      loadYOLOModel(),
+      loadYOLOVistoriasModel(),
+      loadCNNModel()
+    ]);
+
+    console.log('[ALPR] Iniciando Aquecimento (Warm-up) para evitar congelamento de tela...');
+
+    if (yolo) {
+      tf.tidy(() => {
+        const dummy = tf.zeros([1, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE, 3]) as tf.Tensor;
+        const out = yolo.predict(dummy) as tf.Tensor;
+        out.dataSync(); // Executa e descarta
+      });
+    }
+
+    if (yoloAdesivo) {
+      tf.tidy(() => {
+        const dummy = tf.zeros([1, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE, 3]) as tf.Tensor;
+        const out = yoloAdesivo.predict(dummy) as tf.Tensor;
+        out.dataSync();
+      });
+    }
+
+    if (cnn) {
+      tf.tidy(() => {
+        const dummy = tf.zeros([1, 64, 64, 1]) as tf.Tensor;
+        const out = cnn.predict(dummy) as tf.Tensor;
+        out.dataSync();
+      });
+    }
+
+    console.log('[ALPR] Motores aquecidos e prontos para inferência instantânea.');
+  } catch (err) {
+    console.warn('[ALPR] Falha no aquecimento', err);
+  }
 }
 
 interface YOLOBox {
@@ -117,11 +161,9 @@ interface YOLOBox {
   h: number;
   classIndex: number;
   confidence: number;
-  /** Coordenadas no espaço 640×640 (para debug visual) */
   yoloCoords?: { cx: number; cy: number; w: number; h: number };
 }
 
-/** Retorna a mediana dos valores (cópia ordenada; não altera o array original). */
 function getMedian(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -129,7 +171,6 @@ function getMedian(values: number[]): number {
   return sorted.length % 2 !== 0 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
-/** IoU (Intersection over Union) entre duas caixas; usado no NMS. */
 function calculateIoU(box1: YOLOBox, box2: YOLOBox): number {
   const xA = Math.max(box1.x, box2.x);
   const yA = Math.max(box1.y, box2.y);
@@ -142,7 +183,6 @@ function calculateIoU(box1: YOLOBox, box2: YOLOBox): number {
   return unionArea === 0 ? 0 : interArea / unionArea;
 }
 
-/** Caixa delimitadora no espaço da imagem (ex.: saída YOLO para adesivo de vistoria). */
 export interface BoundingBox {
   x: number;
   y: number;
@@ -150,31 +190,26 @@ export interface BoundingBox {
   h: number;
 }
 
-/** Temporário: modelo treinado com poucas imagens retorna conf baixa; 0.1 para debug. */
 const STICKER_YOLO_CONF_THRESHOLD = 0.1;
 
-/**
- * Decodifica saída YOLO de 1 classe (adesivo): [cx, cy, w, h, conf] por detecção.
- * Varre todas as detecções, encontra a de maior confiança (> 0.3) e retorna uma única BoundingBox.
- */
-function decodeYOLOAdesivo(
+async function decodeYOLOAdesivo(
   output: tf.Tensor,
   gain: number,
   padX: number,
   padY: number
-): BoundingBox | null {
-  let tensor = output.squeeze();
-  if (tensor.shape[0] === 5) {
-    tensor = tensor.transpose([1, 0]);
-  }
-  const data = tensor.arraySync() as number[][];
-  tensor.dispose();
+): Promise<BoundingBox | null> {
+  const tensor = tf.tidy(() => {
+    let t = output.squeeze();
+    if (t.shape[0] === 5) t = t.transpose([1, 0]);
+    return t;
+  });
 
-  console.log('[DEBUG ADESIVO] Linhas na saída YOLO:', data.length);
+  // Trocado arraySync() por array() para não congelar a UI do celular
+  const data = await tensor.array() as number[][];
+  tensor.dispose();
 
   let bestConf = 0;
   let bestBox: BoundingBox | null = null;
-  let aboveThreshold = 0;
 
   for (const row of data) {
     const cx = row[0] ?? 0;
@@ -183,7 +218,6 @@ function decodeYOLOAdesivo(
     const h = row[3] ?? 0;
     const conf = row[4] ?? 0;
     if (conf > STICKER_YOLO_CONF_THRESHOLD) {
-      aboveThreshold += 1;
       if (conf > bestConf) {
         bestConf = conf;
         bestBox = {
@@ -195,14 +229,9 @@ function decodeYOLOAdesivo(
       }
     }
   }
-
-  console.log('[DEBUG ADESIVO] Caixas brutas achadas (conf > 0.3):', aboveThreshold, 'Melhor conf:', bestConf.toFixed(3));
   return bestBox;
 }
 
-/**
- * Roda o YOLO de vistorias na imagem e retorna a primeira bounding box do adesivo detectado, ou null.
- */
 export async function detectStickerBox(blob: Blob): Promise<BoundingBox | null> {
   const yolo = await loadYOLOVistoriasModel();
   if (!yolo) return null;
@@ -212,36 +241,36 @@ export async function detectStickerBox(blob: Blob): Promise<BoundingBox | null> 
   const origH = img.height;
 
   const canvas = document.createElement('canvas');
-  canvas.width = 640;
-  canvas.height = 640;
+  canvas.width = YOLO_INPUT_SIZE;
+  canvas.height = YOLO_INPUT_SIZE;
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#727272';
-  ctx.fillRect(0, 0, 640, 640);
+  ctx.fillRect(0, 0, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
 
-  const gain = Math.min(640 / origW, 640 / origH);
-  const padX = (640 - origW * gain) / 2;
-  const padY = (640 - origH * gain) / 2;
+  const gain = Math.min(YOLO_INPUT_SIZE / origW, YOLO_INPUT_SIZE / origH);
+  const padX = (YOLO_INPUT_SIZE - origW * gain) / 2;
+  const padY = (YOLO_INPUT_SIZE - origH * gain) / 2;
   ctx.drawImage(img, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
 
   const inputTensor = tf.browser.fromPixels(canvas, 3).expandDims(0).toFloat().div(255.0) as unknown as tf.Tensor4D;
   const out = yolo.predict(inputTensor) as tf.Tensor;
   const rawOut = Array.isArray(out) ? out[0] : out;
-  const box = decodeYOLOAdesivo(rawOut, gain, padX, padY);
-  if (rawOut && typeof (rawOut as tf.Tensor).dispose === 'function') (rawOut as tf.Tensor).dispose();
+  
+  const box = await decodeYOLOAdesivo(rawOut, gain, padX, padY);
+  
+  // Limpeza rígida para não causar Memory Leak
+  if (Array.isArray(out)) out.forEach(t => t.dispose());
+  else out.dispose();
   inputTensor.dispose();
   if (typeof img.close === 'function') img.close();
 
-  if (!box) return null;
   return box;
 }
 
-/** Opções opcionais para depuração do pipeline OCR do adesivo. */
 export interface ExtractStickerOptions {
-  /** Chamado com data URL do canvas binarizado enviado ao Tesseract (debug visual). */
   onDebugBinarized?: (dataUrl: string) => void;
 }
 
-/** Binarização simples (preto/branco) para melhorar leitura do Tesseract. */
 function binarizeStickerCanvasForOCR(canvas: HTMLCanvasElement, threshold = 150): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -257,9 +286,6 @@ function binarizeStickerCanvasForOCR(canvas: HTMLCanvasElement, threshold = 150)
   ctx.putImageData(imgData, 0, 0);
 }
 
-/**
- * Recorta o adesivo na bounding box, padding branco, escala 3× e binarização para Tesseract.
- */
 export function extractAndPrepareSticker(
   source: HTMLImageElement | HTMLCanvasElement,
   box: BoundingBox,
@@ -294,17 +320,15 @@ export function extractAndPrepareSticker(
   return canvas;
 }
 
-/**
- * Decodifica saída YOLOv8: arraySync, threshold assimétrico, NMS por IoU (0.45), reverte letterbox.
- * ROI com limiar dinâmico (carro vs moto por aspect ratio) e filtro de fragmentos por altura mínima.
- */
 export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: number, padY: number): Promise<YOLOBox[]> {
-  let tensor = output.squeeze();
-  if (tensor.shape[0] === 6) {
-    tensor = tensor.transpose([1, 0]);
-  }
+  const tensor = tf.tidy(() => {
+    let t = output.squeeze();
+    if (t.shape[0] === 6) t = t.transpose([1, 0]);
+    return t;
+  });
 
-  const data = tensor.arraySync() as number[][];
+  // Assíncrono para manter os loaders da interface rodando suavemente
+  const data = await tensor.array() as number[][];
   tensor.dispose();
 
   const rawBoxes: YOLOBox[] = [];
@@ -313,7 +337,6 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     let maxConf = 0;
     let detectedClass = -1;
     
-    // Varre as classes (Índice 4: Caractere/ID 0, Índice 5: Placa/ID 1)
     for (let c = 4; c < row.length; c++) {
       if (row[c] > maxConf) {
         maxConf = row[c];
@@ -321,13 +344,10 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
       }
     }
 
-    // --- ESTRATÉGIA DE THRESHOLD ASSIMÉTRICO ---
-    // 0.25 para caracteres (ajuda a pegar o "I") e 0.45 para a placa (evita falsos positivos)
     const threshold = (detectedClass === 0) ? 0.25 : 0.45;
 
     if (maxConf > threshold) {
       const cx = row[0], cy = row[1], w = row[2], h = row[3];
-
       rawBoxes.push({
         x: Math.max(0, (cx - padX) / gain - (w / gain) / 2),
         y: Math.max(0, (cy - padY) / gain - (h / gain) / 2),
@@ -339,9 +359,6 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     }
   }
 
-  console.log('[DEBUG YOLO] Caixas brutas retornadas:', rawBoxes.length);
-
-  // 1. NMS (Non-Maximum Suppression) por IoU
   const filtered: YOLOBox[] = [];
   rawBoxes.sort((a, b) => b.confidence - a.confidence);
   for (const box of rawBoxes) {
@@ -354,16 +371,11 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     if (!isDuplicate) filtered.push(box);
   }
 
-  // 2. SEPARAÇÃO E LÓGICA DE ROI + FILTRO DE FRAGMENTOS DINÂMICO
   const plateBoxes = filtered.filter(b => b.classIndex === 1);
   let charBoxes = filtered.filter(b => b.classIndex === 0);
 
-  console.log('[DEBUG YOLO] Placas achadas:', plateBoxes.length, 'Caracteres achados:', charBoxes.length);
-
   if (plateBoxes.length > 0) {
     const mainPlate = plateBoxes[0];
-
-    // Diferenciar placa de carro vs moto pela proporção (moto ≈ 2 linhas, mais estreita)
     const isMotoPlate = (mainPlate.w / mainPlate.h) <= 2.2;
     const minCharHeight = isMotoPlate ? (mainPlate.h * 0.2) : (mainPlate.h * 0.35);
 
@@ -380,8 +392,6 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     });
   }
 
-  // --- FILTRO DE CONSENSO (Regra de Negócio: Altura Uniforme) ---
-  // Só aplica o filtro se tivermos uma amostragem mínima confiável (ex: 3 caracteres)
   if (charBoxes.length >= 3) {
     const charBoxesBeforeConsensus = charBoxes;
     try {
@@ -391,41 +401,25 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
       const minAcceptableHeight = medianHeight * 0.7;
       const maxAcceptableHeight = medianHeight * 1.3;
       const afterConsensus = charBoxes.filter(char => {
-        const isConsistent = char.h >= minAcceptableHeight && char.h <= maxAcceptableHeight;
-        if (!isConsistent) {
-          console.warn(`[ALPR Segurança] Fragmento descartado! Altura: ${char.h.toFixed(1)} | Mediana da Placa: ${medianHeight.toFixed(1)}`);
-        }
-        return isConsistent;
+        return char.h >= minAcceptableHeight && char.h <= maxAcceptableHeight;
       });
-      // Fallback: se o filtro esvaziou a lista, mantém a anterior (evita perder placa com poucos caracteres)
       charBoxes = afterConsensus.length > 0 ? afterConsensus : charBoxesBeforeConsensus;
-      if (afterConsensus.length === 0 && charBoxesBeforeConsensus.length > 0) {
-        console.warn('[DEBUG YOLO] Filtro de consenso esvaziou charBoxes; usando lista anterior.');
-      }
     } catch (e) {
-      console.warn('[DEBUG YOLO] Erro no filtro de consenso, mantendo charBoxes:', e);
       charBoxes = charBoxesBeforeConsensus;
     }
   }
 
-  // 3. FILTRO DE PROPORÇÃO (Protege o "I" e remove ruídos horizontais)
   charBoxes = charBoxes.filter(b => b.h > b.w);
 
-  // 4. ORDENAÇÃO 2D (Crucial para Motos)
   charBoxes.sort((a, b) => {
     const yDiff = a.y - b.y;
     if (Math.abs(yDiff) > a.h * 0.5) return yDiff; 
     return a.x - b.x;
   });
 
-  console.log(`[ALPR] Deteções: ${charBoxes.length} caracteres dentro da placa.`);
   return charBoxes;
 }
 
-/**
- * Aplica escala de cinza, binarização por threshold dinâmico e padding em um canvas de caractere.
- * Retorna um novo canvas quadrado (targetSize×targetSize) pronto para ir para a CNN.
- */
 function preprocessCharacterCanvas(sourceCanvas: HTMLCanvasElement, targetSize: number = 64): HTMLCanvasElement {
   const ctx = sourceCanvas.getContext('2d')!;
   const width = sourceCanvas.width;
@@ -433,7 +427,6 @@ function preprocessCharacterCanvas(sourceCanvas: HTMLCanvasElement, targetSize: 
   const imageData = ctx.getImageData(0, 0, width, height);
   const data = imageData.data;
 
-  // 1. Calcula a média de brilho para usar como threshold dinâmico
   let sumBrightness = 0;
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i];
@@ -444,19 +437,17 @@ function preprocessCharacterCanvas(sourceCanvas: HTMLCanvasElement, targetSize: 
   const meanBrightness = sumBrightness / (width * height || 1);
   const threshold = meanBrightness * 0.95;
 
-  // 2. Binarização (preto e branco puro)
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i];
     const g = data[i + 1];
     const b = data[i + 2];
     const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-    const color = gray < threshold ? 0 : 255; // 0 = preto (letra), 255 = branco (fundo)
+    const color = gray < threshold ? 0 : 255; 
     data[i] = data[i + 1] = data[i + 2] = color;
     data[i + 3] = 255;
   }
   ctx.putImageData(imageData, 0, 0);
 
-  // --- NOVO: FILTRO DE EROSÃO (Afina as letras pretas) ---
   const erodedData = new Uint8ClampedArray(data);
   for (let y = 1; y < height - 1; y++) {
     for (let x = 1; x < width - 1; x++) {
@@ -466,11 +457,7 @@ function preprocessCharacterCanvas(sourceCanvas: HTMLCanvasElement, targetSize: 
         const bottomIdx = ((y + 1) * width + x) * 4;
         const leftIdx = (y * width + (x - 1)) * 4;
         const rightIdx = (y * width + (x + 1)) * 4;
-        const top = data[topIdx];
-        const bottom = data[bottomIdx];
-        const left = data[leftIdx];
-        const right = data[rightIdx];
-        if (top === 255 || bottom === 255 || left === 255 || right === 255) {
+        if (data[topIdx] === 255 || data[bottomIdx] === 255 || data[leftIdx] === 255 || data[rightIdx] === 255) {
           erodedData[idx] = erodedData[idx + 1] = erodedData[idx + 2] = 255;
         }
       }
@@ -480,9 +467,7 @@ function preprocessCharacterCanvas(sourceCanvas: HTMLCanvasElement, targetSize: 
     data[i] = erodedData[i];
   }
   ctx.putImageData(imageData, 0, 0);
-  // --- FIM DA EROSÃO ---
 
-  // 3. Canvas final com padding (bordas brancas) para a CNN
   const finalCanvas = document.createElement('canvas');
   finalCanvas.width = targetSize;
   finalCanvas.height = targetSize;
@@ -498,11 +483,6 @@ function preprocessCharacterCanvas(sourceCanvas: HTMLCanvasElement, targetSize: 
   return finalCanvas;
 }
 
-/**
- * Recorta região da imagem original (imageData) usando box e retorna:
- * - tensor [1,64,64,1] binarizado (0–255) para a CNN
- * - dataUrl da letra pré-processada para debug.
- */
 function cropAndPrepareForCNN(
   imageData: Uint8ClampedArray,
   origW: number,
@@ -552,7 +532,6 @@ function cropAndPrepareForCNN(
   return { tensor, debugUrl };
 }
 
-/** Retorna o caractere de maior score dentro do conjunto (LETTERS ou NUMBERS). */
 function getBestFromSet(scores: Float32Array, set: string): string {
   let bestChar = '';
   let maxScore = -1;
@@ -566,17 +545,9 @@ function getBestFromSet(scores: Float32Array, set: string): string {
   return bestChar || '?';
 }
 
-/**
- * Trava de segurança: refina a predição da CNN pela posição na placa.
- * Posições 0,1,2 = só letras; 3,5,6 = só números; 4 = qualquer.
- */
 function refinePrediction(scores: Float32Array, position: number): string {
-  if (position <= 2) {
-    return getBestFromSet(scores, LETTERS);
-  }
-  if (position === 3 || position >= 5) {
-    return getBestFromSet(scores, NUMBERS);
-  }
+  if (position <= 2) return getBestFromSet(scores, LETTERS);
+  if (position === 3 || position >= 5) return getBestFromSet(scores, NUMBERS);
   let maxIdx = 0;
   for (let i = 1; i < scores.length; i++) {
     if (scores[i] > scores[maxIdx]) maxIdx = i;
@@ -584,7 +555,6 @@ function refinePrediction(scores: Float32Array, position: number): string {
   return CHAR_CLASSES[maxIdx] ?? '?';
 }
 
-/** Classifica um tensor [1,64,64,1] com a CNN e retorna o caractere e confiança. Usa refinePrediction quando position é informado. */
 async function predictCharWithCNN(
   cnnModel: tf.LayersModel | tf.GraphModel,
   tensor: tf.Tensor4D,
@@ -611,7 +581,6 @@ async function predictCharWithCNN(
   return { char: idx >= 0 ? char : '?', confidence };
 }
 
-/** Pipeline placa: Blob → Letterbox (fundo #727272, sem div/255) → YOLO → boxes → CNN → { text, confidence, debugImage, charDebugImages }. */
 export async function runPlatePipelineYOLO(
   blob: Blob
 ): Promise<{ text: string; confidence: number; debugImage?: string; charDebugImages?: string[] } | null> {
@@ -624,27 +593,26 @@ export async function runPlatePipelineYOLO(
   const origH = img.height;
 
   const canvas = document.createElement('canvas');
-  canvas.width = 640;
-  canvas.height = 640;
+  canvas.width = YOLO_INPUT_SIZE;
+  canvas.height = YOLO_INPUT_SIZE;
   const ctx = canvas.getContext('2d')!;
 
   ctx.fillStyle = '#727272';
-  ctx.fillRect(0, 0, 640, 640);
+  ctx.fillRect(0, 0, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
 
-  const gain = Math.min(640 / origW, 640 / origH);
-  const padX = (640 - origW * gain) / 2;
-  const padY = (640 - origH * gain) / 2;
+  const gain = Math.min(YOLO_INPUT_SIZE / origW, YOLO_INPUT_SIZE / origH);
+  const padX = (YOLO_INPUT_SIZE - origW * gain) / 2;
+  const padY = (YOLO_INPUT_SIZE - origH * gain) / 2;
 
   ctx.drawImage(img, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
 
-  // fromPixels(canvas, 3) força RGB (remove Alpha). .div(255.0) normaliza e evita alucinação das caixas.
   const inputTensor = tf.browser.fromPixels(canvas, 3).expandDims(0).toFloat().div(255.0) as unknown as tf.Tensor4D;
   const output = yolo.predict(inputTensor) as tf.Tensor;
   const rawOut = Array.isArray(output) ? output[0] : output;
   const boxes = await decodeYOLOOutput(rawOut, gain, padX, padY);
 
-  console.log('[DEBUG YOLO] Caixas após decode (charBoxes para CNN):', boxes.length);
-
+  if (Array.isArray(output)) output.forEach(t => t.dispose());
+  else output.dispose();
   inputTensor.dispose();
 
   if (boxes.length === 0) {
@@ -664,7 +632,6 @@ export async function runPlatePipelineYOLO(
   const charResults: { char: string; confidence: number }[] = [];
   const charDebugImages: string[] = [];
 
-  // Trava posicional: 0,1,2 = letra; 3 = número; 4 = livre; 5,6 = número (refinePrediction em predictCharWithCNN)
   for (let i = 0; i < toProcess.length; i++) {
     const box = toProcess[i];
     const { tensor, debugUrl } = cropAndPrepareForCNN(imageData, origW, origH, box);
@@ -703,13 +670,12 @@ export async function runPlatePipelineYOLO(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CLAHE — Contrast Limited Adaptive Histogram Equalization (TF.js accelerated)
+// CLAHE — Contrast Limited Adaptive Histogram Equalization
 // ═══════════════════════════════════════════════════════════════════════════════
 async function applyCLAHE(
   imageData: ImageData,
   tileGridX = 8, tileGridY = 8, clipLimit = 2.5
 ): Promise<void> {
-  await ensureTF();
   const { width, height, data } = imageData;
   const gray = new Float32Array(width * height);
   for (let i = 0; i < gray.length; i++) {
@@ -781,49 +747,7 @@ function gaussianBlur(data: Uint8ClampedArray, width: number, height: number) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Otsu's Binarization — automatic optimal threshold
-// ═══════════════════════════════════════════════════════════════════════════════
-function otsuThreshold(data: Uint8ClampedArray, width: number, height: number): number {
-  const hist = new Float64Array(256);
-  const total = width * height;
-  for (let i = 0; i < total; i++) {
-    const gray = Math.round(data[i * 4] * 0.299 + data[i * 4 + 1] * 0.587 + data[i * 4 + 2] * 0.114);
-    hist[Math.min(255, Math.max(0, gray))]++;
-  }
-
-  let sumAll = 0;
-  for (let i = 0; i < 256; i++) sumAll += i * hist[i];
-
-  let sumB = 0, wB = 0;
-  let maxVariance = 0, bestT = 128;
-
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    const wF = total - wB;
-    if (wF === 0) break;
-    sumB += t * hist[t];
-    const meanB = sumB / wB;
-    const meanF = (sumAll - sumB) / wF;
-    const variance = wB * wF * (meanB - meanF) * (meanB - meanF);
-    if (variance > maxVariance) { maxVariance = variance; bestT = t; }
-  }
-  return bestT;
-}
-
-function applyOtsuBinarization(data: Uint8ClampedArray, width: number, height: number) {
-  const threshold = otsuThreshold(data, width, height);
-  console.log(`[ALPR] Otsu threshold: ${threshold}`);
-  for (let i = 0; i < width * height; i++) {
-    const gray = data[i * 4] * 0.299 + data[i * 4 + 1] * 0.587 + data[i * 4 + 2] * 0.114;
-    const val = gray > threshold ? 255 : 0;
-    const idx = i * 4;
-    data[idx] = data[idx + 1] = data[idx + 2] = val;
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Adaptive Thresholding (local mean) — fallback strategy
+// Adaptive Thresholding (local mean)
 // ═══════════════════════════════════════════════════════════════════════════════
 function adaptiveThreshold(data: Uint8ClampedArray, width: number, height: number, blockSize = 15, C = 2) {
   const gray = new Float32Array(width * height);
@@ -855,14 +779,13 @@ function adaptiveThreshold(data: Uint8ClampedArray, width: number, height: numbe
 }
 
 function computeAdaptiveWindowSize(height: number): number {
-  // Window ~ 1/8 da altura (tamanho aproximado da letra), sempre ímpar e no mínimo 15
   const approx = Math.floor(height / 8);
   const base = Math.max(15, approx);
   return base % 2 === 0 ? base + 1 : base;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Morphological Operations
+// Morphological Operations & Noise Removal
 // ═══════════════════════════════════════════════════════════════════════════════
 function morphDilate(data: Uint8ClampedArray, w: number, h: number) {
   const copy = new Uint8ClampedArray(data);
@@ -892,7 +815,6 @@ function morphErode(data: Uint8ClampedArray, w: number, h: number) {
   }
 }
 
-// Simple speckle removal: remove isolated dark pixels surrounded by white
 function removeIsolatedPixels(data: Uint8ClampedArray, w: number, h: number) {
   const copy = new Uint8ClampedArray(data);
   for (let y = 1; y < h - 1; y++) {
@@ -908,7 +830,6 @@ function removeIsolatedPixels(data: Uint8ClampedArray, w: number, h: number) {
             if (copy[nIdx] < 128) darkNeighbors++;
           }
         }
-        // Pixels with 0–1 dark neighbors are treated as isolated noise
         if (darkNeighbors <= 1) {
           data[idx] = data[idx + 1] = data[idx + 2] = 255;
         }
@@ -917,84 +838,6 @@ function removeIsolatedPixels(data: Uint8ClampedArray, w: number, h: number) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Character-level Morphology — Thinning & Light Dilation for OCR
-// ═══════════════════════════════════════════════════════════════════════════════
-function thinCharacterCanvas(canvas: HTMLCanvasElement) {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const { width, height } = canvas;
-  if (width <= 2 || height <= 2) return;
-
-  const img = ctx.getImageData(0, 0, width, height);
-  const data = img.data;
-  const copy = new Uint8ClampedArray(data);
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = (y * width + x) * 4;
-      const gray = copy[idx];
-      // Only consider dark pixels (character strokes)
-      if (gray < 128) {
-        let whiteNeighbors = 0;
-        for (let ky = -1; ky <= 1; ky++) {
-          for (let kx = -1; kx <= 1; kx++) {
-            if (kx === 0 && ky === 0) continue;
-            const nIdx = ((y + ky) * width + (x + kx)) * 4;
-            if (copy[nIdx] > 200) whiteNeighbors++;
-          }
-        }
-        // If surrounded by at least 2 white neighbors, thin this pixel
-        if (whiteNeighbors >= 2) {
-          data[idx] = data[idx + 1] = data[idx + 2] = 255;
-        }
-      }
-    }
-  }
-
-  ctx.putImageData(img, 0, 0);
-}
-
-function dilateCharacterCanvas(canvas: HTMLCanvasElement) {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const { width, height } = canvas;
-  if (width <= 2 || height <= 2) return;
-
-  const img = ctx.getImageData(0, 0, width, height);
-  const data = img.data;
-  const copy = new Uint8ClampedArray(data);
-
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = (y * width + x) * 4;
-      const gray = copy[idx];
-      // Only expand from existing dark pixels into nearby white pixels
-      if (gray >= 128) {
-        let hasDarkNeighbor = false;
-        for (let ky = -1; ky <= 1 && !hasDarkNeighbor; ky++) {
-          for (let kx = -1; kx <= 1; kx++) {
-            if (kx === 0 && ky === 0) continue;
-            const nIdx = ((y + ky) * width + (x + kx)) * 4;
-            if (copy[nIdx] < 128) {
-              hasDarkNeighbor = true;
-              break;
-            }
-          }
-        }
-        if (hasDarkNeighbor) {
-          data[idx] = data[idx + 1] = data[idx + 2] = 0;
-        }
-      }
-    }
-  }
-
-  ctx.putImageData(img, 0, 0);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Noise Removal — remove connected components smaller than threshold
-// ═══════════════════════════════════════════════════════════════════════════════
 function removeSmallNoise(data: Uint8ClampedArray, w: number, h: number, minSizeFraction = 0.05) {
   const minArea = Math.round(h * minSizeFraction * h * minSizeFraction);
   const labels = new Int32Array(w * h);
@@ -1002,13 +845,11 @@ function removeSmallNoise(data: Uint8ClampedArray, w: number, h: number, minSize
   const labelSizes: Map<number, number> = new Map();
   const labelPixels: Map<number, number[]> = new Map();
 
-  // Connected component labeling (4-connected) on dark pixels
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const idx = y * w + x;
-      if (data[idx * 4] >= 128 || labels[idx] !== 0) continue; // skip white or already labeled
+      if (data[idx * 4] >= 128 || labels[idx] !== 0) continue; 
       
-      // BFS flood fill
       const label = nextLabel++;
       const queue = [idx];
       labels[idx] = label;
@@ -1031,29 +872,24 @@ function removeSmallNoise(data: Uint8ClampedArray, w: number, h: number, minSize
           }
         }
       }
-      
       labelSizes.set(label, pixels.length);
       labelPixels.set(label, pixels);
     }
   }
 
-  // Remove components smaller than threshold
-  let removed = 0;
   for (const [label, size] of labelSizes) {
     if (size < minArea) {
       const pixels = labelPixels.get(label)!;
       for (const pi of pixels) {
         const idx = pi * 4;
-        data[idx] = data[idx + 1] = data[idx + 2] = 255; // turn to white
+        data[idx] = data[idx + 1] = data[idx + 2] = 255; 
       }
-      removed++;
     }
   }
-  if (removed > 0) console.log(`[ALPR] Removed ${removed} noise components (min area: ${minArea}px)`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Upscale — ensure minimum width for character recognition
+// Upscale 
 // ═══════════════════════════════════════════════════════════════════════════════
 function upscaleCanvas(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, minWidth = 1000) {
   if (canvas.width >= minWidth) return;
@@ -1063,13 +899,11 @@ function upscaleCanvas(canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D,
   const tmpCanvas = document.createElement('canvas');
   tmpCanvas.width = newW; tmpCanvas.height = newH;
   const tmpCtx = tmpCanvas.getContext('2d')!;
-  // Use high-quality interpolation
   tmpCtx.imageSmoothingEnabled = true;
   tmpCtx.imageSmoothingQuality = 'high';
   tmpCtx.drawImage(canvas, 0, 0, newW, newH);
   canvas.width = newW; canvas.height = newH;
   ctx.drawImage(tmpCanvas, 0, 0);
-  console.log(`[ALPR] Upscaled from ${Math.round(newW / scale)}px to ${newW}px (${scale.toFixed(1)}x)`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1147,16 +981,8 @@ function cropToOverlay(
 ) {
   canvas.width = img.width; canvas.height = img.height;
   ctx.drawImage(img, 0, 0);
-  // Keep crop aligned with the camera guidance overlay:
-  // - plate: large square (1:1) to allow freer framing (cars + bikes)
-  // - number: keep compact rectangle
-  const rawW = type === 'plate'
-    ? Math.min(img.width, img.height) * 0.78
-    : img.width * 0.45;
-  const rawH = type === 'plate'
-    ? rawW
-    : img.height * 0.18;
-  // Add 15% padding for OCR breathing room
+  const rawW = type === 'plate' ? Math.min(img.width, img.height) * 0.78 : img.width * 0.45;
+  const rawH = type === 'plate' ? rawW : img.height * 0.18;
   const padX = rawW * 0.15;
   const padY = rawH * 0.15;
   const cropX = Math.max(0, (img.width - rawW) / 2 - padX);
@@ -1165,14 +991,13 @@ function cropToOverlay(
   const cropH = Math.min(img.height - cropY, rawH + padY * 2);
   const cropped = ctx.getImageData(cropX, cropY, cropW, cropH);
   canvas.width = cropW; canvas.height = cropH;
-  // White background fill for padding areas
   ctx.fillStyle = '#FFFFFF';
   ctx.fillRect(0, 0, cropW, cropH);
   ctx.putImageData(cropped, 0, 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Full Preprocessing Pipeline — returns both processed blob AND debug image
+// Full Preprocessing Pipeline 
 // ═══════════════════════════════════════════════════════════════════════════════
 async function preprocessAdvanced(
   blob: Blob,
@@ -1191,19 +1016,11 @@ async function preprocessAdvanced(
         const ctx = canvas.getContext('2d')!;
         if (!ctx) return reject(new Error('No canvas context'));
 
-        // Step 1: Crop to ROI
-        if (cropType) {
-          cropToOverlay(canvas, ctx, img, cropType);
-        } else {
-          ctx.drawImage(img, 0, 0);
-        }
+        if (cropType) cropToOverlay(canvas, ctx, img, cropType);
+        else ctx.drawImage(img, 0, 0);
 
-        // Step 2: Perspective correction (plate only)
-        if (cropType === 'plate') {
-          perspectiveWarp(canvas, ctx);
-        }
+        if (cropType === 'plate') perspectiveWarp(canvas, ctx);
 
-        // Step 3: Upscale to minimum 1000px width
         const currentCtx = canvas.getContext('2d')!;
         upscaleCanvas(canvas, currentCtx, 1000);
 
@@ -1211,32 +1028,18 @@ async function preprocessAdvanced(
         const freshCtx = canvas.getContext('2d')!;
         let imageData = freshCtx.getImageData(0, 0, w, h);
 
-        // Step 4: CLAHE — Adaptive Histogram Equalization (TF.js)
-        // Usar grade de tiles proporcional ao tamanho da janela adaptativa (baseada na altura)
         const winSize = computeAdaptiveWindowSize(h);
         const tilesX = Math.max(4, Math.round(w / winSize));
         const tilesY = Math.max(4, Math.round(h / winSize));
         await applyCLAHE(imageData, tilesX, tilesY, 3.2);
 
-        // Step 5: Gaussian Blur (noise reduction)
         gaussianBlur(imageData.data, w, h);
-
-        // Step 6: Binarization — Adaptive thresholding (local mean over Gaussian-blurred image)
-        // Janela proporcional à altura e C maior para eliminar fundo cinza de pátio/carro.
         adaptiveThreshold(imageData.data, w, h, winSize, 9);
-
-        // Step 7: Morphological Opening (Erode then Dilate) — remove speckles and thin noise
-        // Pequeno kernel 3x3 aproximando uma abertura com efeito de 2x2 em vizinhança local.
         morphErode(imageData.data, w, h);
         morphDilate(imageData.data, w, h);
-
-        // Step 8: Remove small noise (< 5% of plate height)
         removeSmallNoise(imageData.data, w, h, 0.05);
-
-        // Step 9: Remove isolated dark pixels (single speckles from grille/ground)
         removeIsolatedPixels(imageData.data, w, h);
 
-        // Step 10: Normalize output to pure black/white (no intermediate grays)
         for (let i = 0; i < w * h; i++) {
           const idx = i * 4;
           const gray = imageData.data[idx];
@@ -1245,8 +1048,6 @@ async function preprocessAdvanced(
         }
 
         freshCtx.putImageData(imageData, 0, 0);
-
-        // Generate debug image (data URL)
         const debugImage = canvas.toDataURL('image/png');
 
         canvas.toBlob(
@@ -1266,7 +1067,7 @@ async function preprocessAdvanced(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Mercosul Mask — Position-based character correction
+// Mercosul Mask 
 // ═══════════════════════════════════════════════════════════════════════════════
 const DIGIT_TO_LETTER: Record<string, string> = {
   '0': 'O', '1': 'I', '2': 'Z', '3': 'E', '4': 'A',
@@ -1281,30 +1082,23 @@ function applyMercosulMask(text: string): string {
   if (text.length < 7) return text;
   const chars = text.slice(0, 7).split('');
 
-  // Positions 0,1,2 MUST be letters
   for (let i = 0; i < 3; i++) {
-    if (/\d/.test(chars[i]) && DIGIT_TO_LETTER[chars[i]]) {
-      chars[i] = DIGIT_TO_LETTER[chars[i]];
-    }
+    if (/\d/.test(chars[i]) && DIGIT_TO_LETTER[chars[i]]) chars[i] = DIGIT_TO_LETTER[chars[i]];
   }
 
-  // Position 3 MUST be a number
   if (/[A-Z]/.test(chars[3]) && LETTER_TO_DIGIT[chars[3]]) {
     chars[3] = LETTER_TO_DIGIT[chars[3]];
   }
 
-  // Positions 5,6 MUST be numbers
   for (let i = 5; i < 7; i++) {
-    if (/[A-Z]/.test(chars[i]) && LETTER_TO_DIGIT[chars[i]]) {
-      chars[i] = LETTER_TO_DIGIT[chars[i]];
-    }
+    if (/[A-Z]/.test(chars[i]) && LETTER_TO_DIGIT[chars[i]]) chars[i] = LETTER_TO_DIGIT[chars[i]];
   }
 
   return chars.join('');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// OCR: Placa = YOLO + CNN; Número = pré-processamento + Tesseract
+// OCR Principal 
 // ═══════════════════════════════════════════════════════════════════════════════
 export async function ocrWithVoting(
   blob: Blob,
@@ -1312,17 +1106,15 @@ export async function ocrWithVoting(
   createWorkerFn: () => Promise<any>,
   whitelist: string
 ): Promise<{ text: string; confidence: number; corrections?: string[]; debugImage?: string; charDebugImages?: string[] }> {
-  // ═══ PLACA: crop quadrado 1:1 → 640×640 → YOLO + CNN ═══
   if (cropType === 'plate') {
     try {
       const yolo = await loadYOLOModel();
       const cnn = await loadCNNModel();
-      if (!yolo || !cnn) {
-        console.error('[ALPR] Modelos YOLO/CNN indisponíveis em ocrWithVoting; retornando confiança 0');
-        return { text: '', confidence: 0 };
-      }
+      if (!yolo || !cnn) return { text: '', confidence: 0 };
+      
       const result = await runPlatePipelineYOLO(blob);
       if (!result) return { text: '', confidence: 0 };
+      
       return {
         text: result.text,
         confidence: result.confidence,
@@ -1331,15 +1123,13 @@ export async function ocrWithVoting(
         charDebugImages: result.charDebugImages,
       };
     } catch (e) {
-      console.error('[ALPR] YOLO+CNN plate pipeline failed:', e);
+      console.error('[ALPR] YOLO+CNN falhou:', e);
       return { text: '', confidence: 0 };
     }
   }
 
-  // ═══ NÚMERO DA VISTORIA: pré-processamento + Tesseract ═══
-  const strategies: Array<{ strategy: 'adaptive'; threshold?: number }> = [
-    { strategy: 'adaptive' },
-  ];
+  // Adesivo
+  const strategies: Array<{ strategy: 'adaptive'; threshold?: number }> = [{ strategy: 'adaptive' }];
   const preprocessResults: { processed: Blob; debugImage: string; strategy: string }[] = [];
   const preprocessPromises = strategies.map(async (s) => {
     try {
@@ -1347,20 +1137,18 @@ export async function ocrWithVoting(
       return { processed, debugImage, strategy: s.strategy };
     } catch { return null; }
   });
+  
   const preprocessed = await Promise.all(preprocessPromises);
   for (const r of preprocessed) if (r) preprocessResults.push(r);
 
   if (preprocessResults.length === 0) return { text: '', confidence: 0 };
 
-  // Full-image OCR (Tesseract) para número
   const results: { text: string; confidence: number; debugImage?: string }[] = [];
 
   for (const prep of preprocessResults) {
     try {
       const worker = await createWorkerFn();
-      await worker.setParameters({
-        tessedit_char_whitelist: whitelist,
-      });
+      await worker.setParameters({ tessedit_char_whitelist: whitelist });
       const { data } = await worker.recognize(prep.processed);
       await worker.terminate();
 
@@ -1376,10 +1164,6 @@ export async function ocrWithVoting(
   return { text: results[0].text, confidence: results[0].confidence, debugImage: results[0].debugImage };
 }
 
-/**
- * Recorta o quadrado central da imagem (menor lado × menor lado) e redimensiona para 640×640.
- * Usado antes do pipeline ALPR para eliminar letterbox: o YOLO recebe exatamente o que o usuário enquadrou.
- */
 export async function cropToSquare640(blob: Blob): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -1411,34 +1195,10 @@ export async function cropToSquare640(blob: Blob): Promise<Blob> {
   });
 }
 
-// Helper: convert Blob to ImageData for classifier
-async function blobToImageData(blob: Blob): Promise<{ imageData: Uint8ClampedArray; w: number; h: number }> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width; canvas.height = img.height;
-      const ctx = canvas.getContext('2d')!;
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, img.width, img.height);
-      URL.revokeObjectURL(img.src);
-      resolve({ imageData: data.data, w: img.width, h: img.height });
-    };
-    img.onerror = reject;
-    img.src = URL.createObjectURL(blob);
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Backward-compatible export
-// ═══════════════════════════════════════════════════════════════════════════════
 export function preprocessForOCR(blob: Blob, cropType?: 'plate' | 'number'): Promise<Blob> {
   return preprocessAdvanced(blob, cropType, 'adaptive').then(r => r.processed);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// O/Q Ambiguity Detection
-// ═══════════════════════════════════════════════════════════════════════════════
 export function detectOQAmbiguity(plate: string): string | null {
   if (plate.length !== 7) return null;
   const letterPositions = [0, 1, 2, 4];
@@ -1453,9 +1213,6 @@ export function detectOQAmbiguity(plate: string): string | null {
   return null;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Image Compression
-// ═══════════════════════════════════════════════════════════════════════════════
 export function compressImage(blob: Blob, maxWidth = 1280, quality = 0.7): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const img = new Image();

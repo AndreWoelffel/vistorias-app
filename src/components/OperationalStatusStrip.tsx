@@ -1,68 +1,70 @@
-import { RefreshCw, WifiOff } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { getSyncStatusVariant } from "@/components/SyncStatusIndicator";
+import { Loader2, AlertTriangle, CloudOff, CloudUpload } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
-type Props = {
+interface OperationalStatusStripProps {
   online: boolean;
   syncing: boolean;
   pendingCount: number;
   failedCount: number;
   className?: string;
-};
+}
 
-/** Verde = enviado · Amarelo = pendente · Vermelho = erro · Cinza = sem internet */
 export function OperationalStatusStrip({
   online,
   syncing,
   pendingCount,
   failedCount,
   className,
-}: Props) {
-  const variant = getSyncStatusVariant(online, syncing, pendingCount, failedCount);
+}: OperationalStatusStripProps) {
+  
+  // 1. Sem conexão
+  if (!online) {
+    return (
+      <div className={cn("flex items-center gap-1.5 rounded-full border border-destructive/30 bg-destructive/10 px-2.5 py-1 text-[11px] font-bold text-destructive shadow-sm", className)}>
+        <CloudOff className="h-3.5 w-3.5" />
+        <span>Offline</span>
+      </div>
+    );
+  }
 
-  const dotClass =
-    variant === "error"
-      ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]"
-      : variant === "pending"
-        ? "bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.45)]"
-        : variant === "synced"
-          ? "bg-emerald-500 shadow-[0_0_6px_rgba(34,197,94,0.4)]"
-          : "bg-muted-foreground/60";
+  // 2. Erros críticos na fila
+  if (failedCount > 0) {
+    return (
+      <div className={cn("flex items-center gap-1.5 rounded-full border border-red-500/30 bg-red-500/10 px-2.5 py-1 text-[11px] font-bold text-red-600 dark:text-red-400 shadow-sm", className)}>
+        <AlertTriangle className="h-3.5 w-3.5" />
+        <span>{failedCount} erro(s)</span>
+      </div>
+    );
+  }
 
-  let label = "Enviado";
-  if (!online) label = "Sem internet";
-  else if (variant === "error") label = "Erro ao sincronizar";
-  else if (variant === "pending") label = syncing ? "Enviando…" : "Pendente";
+  // 3. Sistema trabalhando agora
+  if (syncing) {
+    return (
+      <div className={cn("flex items-center gap-1.5 rounded-full border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 shadow-sm", className)}>
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <span>Sincronizando...</span>
+      </div>
+    );
+  }
 
+  // 4. Conectado, mas com fila pendente
+  if (pendingCount > 0) {
+    return (
+      <div className={cn("flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-bold text-amber-600 dark:text-amber-400 shadow-sm", className)}>
+        <CloudUpload className="h-3.5 w-3.5" />
+        <span>{pendingCount} na fila</span>
+      </div>
+    );
+  }
+
+  // 5. Estado Ideal: Conectado e fila limpa
   return (
-    <div
-      className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-full border border-border/80 bg-card/80 px-3 py-1.5 text-xs font-medium",
-        className,
-      )}
-      role="status"
-    >
-      {!online && <WifiOff className="h-3.5 w-3.5 text-muted-foreground shrink-0" aria-hidden />}
-      {online && syncing && variant === "pending" && (
-        <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-600 dark:text-amber-400" aria-hidden />
-      )}
-      <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", dotClass)} aria-hidden />
-      <span
-        className={cn(
-          variant === "error" && "text-red-600 dark:text-red-400",
-          variant === "pending" && online && "text-amber-700 dark:text-amber-300",
-          variant === "synced" && online && "text-emerald-700 dark:text-emerald-300",
-          !online && "text-muted-foreground",
-        )}
-      >
-        {label}
-        {online && variant === "error" && failedCount > 0 && (
-          <span className="ml-1 tabular-nums font-semibold">({failedCount})</span>
-        )}
-        {online && variant === "pending" && !syncing && pendingCount > 0 && (
-          <span className="ml-1 tabular-nums font-semibold">({pendingCount})</span>
-        )}
-      </span>
+    <div className={cn("flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 shadow-sm transition-all", className)}>
+      <div className="relative flex h-2.5 w-2.5 items-center justify-center">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+      </div>
+      <span className="tracking-wide">Online</span>
     </div>
   );
 }

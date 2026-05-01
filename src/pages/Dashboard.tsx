@@ -74,17 +74,13 @@ function dayKeysBetween(fromMs: number, toMs: number): string[] {
 export default function Dashboard() {
   const { leilaoId: id, ready } = useRequireValidLeilao();
   const navigate = useNavigate();
-  const [counts, setCounts] = useState<Awaited<ReturnType<typeof dashboardCountsForLeilao>> | null>(
-    null,
-  );
+  const [counts, setCounts] = useState<Awaited<ReturnType<typeof dashboardCountsForLeilao>> | null>(null);
   const [attention, setAttention] = useState<AttentionListItem[]>([]);
   const [period, setPeriod] = useState<DashboardPeriod>("7d");
   const [chartView, setChartView] = useState<ChartView>("vistoriador");
   const [chartRows, setChartRows] = useState<Record<string, string | number>[]>([]);
   const [chartKeys, setChartKeys] = useState<string[]>([]);
-  const [periodMetrics, setPeriodMetrics] = useState<Awaited<
-    ReturnType<typeof periodMetricsForLeilao>
-  > | null>(null);
+  const [periodMetrics, setPeriodMetrics] = useState<Awaited<ReturnType<typeof periodMetricsForLeilao>> | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncingAttention, setSyncingAttention] = useState(false);
 
@@ -179,15 +175,16 @@ export default function Dashboard() {
   }, [period]);
 
   const handleTrySync = async () => {
+    if (syncingAttention) return;
     setSyncingAttention(true);
     try {
       await processQueue();
       await load();
-      toast({ title: "Envio tentado", description: "Confira os cards acima se algo ainda falhou." });
+      toast({ title: "Envio concluído", description: "Verifique os cards acima para confirmar se tudo foi enviado." });
     } catch {
       toast({
-        title: "Não foi possível enviar agora",
-        description: "Espere a internet e tente de novo.",
+        title: "Erro de comunicação",
+        description: "Falha ao conectar com o Supabase. Tente mais tarde.",
         variant: "destructive",
       });
     } finally {
@@ -201,7 +198,7 @@ export default function Dashboard() {
         <AppHeader title="Painel" showBack onBack={() => navigate("/")} />
         <div className="flex flex-1 flex-col items-center justify-center gap-2">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
-          <p className="text-sm text-muted-foreground">Carregando…</p>
+          <p className="text-sm text-muted-foreground font-medium">Carregando métricas…</p>
         </div>
       </div>
     );
@@ -211,20 +208,20 @@ export default function Dashboard() {
     <div className="flex min-h-screen flex-col bg-background">
       <AppHeader title="Painel" showBack onBack={() => navigate("/")} />
 
-      <div className={cn("flex-1 space-y-5 p-4 pb-28", loading && counts && "opacity-70 transition-opacity")}>
+      <div className={cn("flex-1 space-y-6 p-4 pb-28", loading && counts && "opacity-60 transition-opacity duration-300")}>
         {loading && !counts ? (
-          <div className="flex flex-col items-center justify-center py-16 gap-2 text-muted-foreground">
+          <div className="flex flex-col items-center justify-center py-16 gap-3 text-muted-foreground">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-sm">Carregando…</p>
+            <p className="text-sm font-medium">Carregando Painel…</p>
           </div>
         ) : counts ? (
           <>
-            <section className="space-y-3">
+            <section className="space-y-4">
               <div className="flex items-center justify-between gap-2">
-                <h2 className="text-sm font-semibold text-foreground">Hoje no leilão</h2>
+                <h2 className="text-sm font-bold text-foreground uppercase tracking-wide">Hoje no leilão</h2>
                 {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0" aria-label="Atualizando" />}
               </div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-3 gap-3">
                 <StatCard
                   icon={<CalendarDays className="h-4 w-4" />}
                   label="Hoje"
@@ -245,7 +242,7 @@ export default function Dashboard() {
                   sub="no aparelho"
                 />
               </div>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-3 gap-3">
                 <StatCard
                   icon={<CloudOff className="h-4 w-4" />}
                   label="A enviar"
@@ -270,14 +267,14 @@ export default function Dashboard() {
               </div>
             </section>
 
-            <section className="space-y-2">
-              <h2 className="text-sm font-semibold text-foreground">Vistorias por dia</h2>
-              <div className="flex flex-wrap gap-1">
+            <section className="space-y-3 pt-2">
+              <h2 className="text-sm font-bold text-foreground uppercase tracking-wide">Vistorias por dia</h2>
+              <div className="flex flex-wrap gap-2">
                 {(
                   [
-                    ["7d", "7 d"],
-                    ["30d", "30 d"],
-                    ["90d", "90 d"],
+                    ["7d", "7 dias"],
+                    ["30d", "30 dias"],
+                    ["90d", "90 dias"],
                     ["all", "Tudo"],
                   ] as const
                 ).map(([p, lab]) => (
@@ -285,69 +282,80 @@ export default function Dashboard() {
                     key={p}
                     type="button"
                     size="sm"
-                    variant={period === p ? "default" : "ghost"}
-                    className="h-9 rounded-full px-3 text-xs"
+                    variant={period === p ? "default" : "secondary"}
+                    className="h-8 rounded-full px-4 text-xs font-semibold transition-colors"
                     onClick={() => setPeriod(p)}
                   >
                     {lab}
                   </Button>
                 ))}
               </div>
-              <div className="flex flex-wrap gap-1 border-b border-border/60 pb-2">
+              <div className="flex flex-wrap gap-2 border-b border-border/60 pb-3">
                 <Button
                   type="button"
                   size="sm"
                   variant={chartView === "total" ? "secondary" : "ghost"}
-                  className="h-8 rounded-lg text-xs"
+                  className="h-8 rounded-lg text-xs font-medium"
                   onClick={() => setChartView("total")}
                 >
-                  Total
+                  Total Geral
                 </Button>
                 <Button
                   type="button"
                   size="sm"
                   variant={chartView === "vistoriador" ? "secondary" : "ghost"}
-                  className="h-8 rounded-lg text-xs"
+                  className="h-8 rounded-lg text-xs font-medium"
                   onClick={() => setChartView("vistoriador")}
                 >
-                  Por pessoa
+                  Por Vistoriador
                 </Button>
                 <Button
                   type="button"
                   size="sm"
                   variant={chartView === "leilao" ? "secondary" : "ghost"}
-                  className="h-8 rounded-lg text-xs"
+                  className="h-8 rounded-lg text-xs font-medium"
                   onClick={() => setChartView("leilao")}
                 >
-                  Por leilão
+                  Por Leilão
                 </Button>
               </div>
 
-              <div className="overflow-x-auto rounded-xl border border-border/60 bg-card/50 p-2">
+              <div className="overflow-x-auto rounded-xl border border-border/80 bg-card/40 p-3 shadow-inner">
                 {chartRows.length === 0 || chartKeys.length === 0 ? (
-                  <p className="py-10 text-center text-sm text-muted-foreground">Sem dados neste período.</p>
+                  <p className="py-12 text-center text-sm font-medium text-muted-foreground">Sem dados de vistorias neste período.</p>
                 ) : (
-                  <div style={{ minWidth: chartMinWidth, height: 220 }}>
+                  <div style={{ minWidth: chartMinWidth, height: 240 }}>
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={chartRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" className="stroke-border/50" />
-                        <XAxis dataKey="day" tick={{ fontSize: 10 }} />
-                        <YAxis allowDecimals={false} tick={{ fontSize: 10 }} width={32} />
+                      <BarChart data={chartRows} margin={{ top: 12, right: 10, left: -15, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" className="stroke-border/40" vertical={false} />
+                        <XAxis dataKey="day" tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} tickMargin={8} axisLine={false} tickLine={false} />
+                        <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} width={40} axisLine={false} tickLine={false} />
                         <Tooltip
+                          cursor={{ fill: "hsl(var(--secondary))", opacity: 0.4 }}
                           contentStyle={{
-                            borderRadius: 8,
+                            borderRadius: 12,
                             border: "1px solid hsl(var(--border))",
                             background: "hsl(var(--card))",
+                            color: "hsl(var(--foreground))",
+                            boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+                            padding: "8px 12px",
+                            fontSize: "12px",
+                            fontWeight: "500"
+                          }}
+                          itemStyle={{
+                            color: "hsl(var(--foreground))",
+                            fontWeight: "600"
                           }}
                         />
-                        <Legend wrapperStyle={{ fontSize: 11 }} />
+                        <Legend wrapperStyle={{ fontSize: 12, paddingTop: "10px", fontWeight: "500" }} iconType="circle" />
                         {chartKeys.map((k, i) => (
                           <Bar
                             key={k}
                             dataKey={k}
                             stackId="a"
                             fill={CHART_COLORS[i % CHART_COLORS.length]}
-                            radius={[2, 2, 0, 0]}
+                            radius={[4, 4, 0, 0]}
+                            maxBarSize={40}
                           />
                         ))}
                       </BarChart>
@@ -358,101 +366,107 @@ export default function Dashboard() {
             </section>
 
             {periodMetrics && (
-              <details className="group rounded-xl border border-border/50 bg-muted/10">
-                <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium text-foreground [&::-webkit-details-marker]:hidden">
-                  <span>Mais números ({periodLabel})</span>
-                  <span className="text-xs text-muted-foreground transition-transform group-open:rotate-180">▼</span>
+              <details className="group rounded-xl border border-border/80 bg-muted/20 shadow-sm transition-all open:bg-card">
+                <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3.5 text-sm font-bold text-foreground [&::-webkit-details-marker]:hidden hover:text-primary transition-colors">
+                  <span>Métricas Detalhadas ({periodLabel})</span>
+                  <span className="text-xs text-muted-foreground transition-transform duration-200 group-open:rotate-180">▼</span>
                 </summary>
-                <div className="grid grid-cols-1 gap-2 border-t border-border/40 px-3 py-3 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 border-t border-border/50 px-4 py-4 sm:grid-cols-2">
                   <MetricRow
-                    icon={<TrendingUp className="h-4 w-4 text-emerald-600" />}
-                    label="Enviadas no período"
+                    icon={<TrendingUp className="h-4 w-4 text-emerald-500" />}
+                    label="Taxa de Envio"
                     value={`${periodMetrics.taxaSync}%`}
-                    hint="Das que estão neste aparelho."
+                    hint="Vistorias sincronizadas com o Supabase"
                   />
                   <MetricRow
-                    icon={<User className="h-4 w-4 text-primary" />}
-                    label="Quem mais fez"
+                    icon={<User className="h-4 w-4 text-blue-500" />}
+                    label="Top Vistoriador"
                     value={periodMetrics.topVistoriador}
-                    hint={`${periodMetrics.topVistoriadorCount} vistorias`}
+                    hint={`${periodMetrics.topVistoriadorCount} vistorias realizadas`}
                   />
                   <MetricRow
-                    icon={<Gavel className="h-4 w-4 text-primary" />}
-                    label="Leilão com mais registros"
+                    icon={<Gavel className="h-4 w-4 text-purple-500" />}
+                    label="Leilão Mais Ativo"
                     value={periodMetrics.topLeilao}
-                    hint={`${periodMetrics.topLeilaoCount} no período`}
+                    hint={`${periodMetrics.topLeilaoCount} registros no período`}
                   />
                   <MetricRow
-                    icon={<CalendarDays className="h-4 w-4 text-primary" />}
-                    label="Média e pico"
-                    value={`${periodMetrics.mediaDiaria} / dia`}
-                    hint={`Pico num dia: ${periodMetrics.pico}`}
+                    icon={<CalendarDays className="h-4 w-4 text-orange-500" />}
+                    label="Desempenho Diário"
+                    value={`${periodMetrics.mediaDiaria} vistorias/dia`}
+                    hint={`Pico máximo: ${periodMetrics.pico} em um único dia`}
                   />
                 </div>
               </details>
             )}
 
-            <section className="space-y-2">
-              <h2 className="text-sm font-semibold text-foreground">Precisa de ação</h2>
+            <section className="space-y-3 pt-2">
+              <h2 className="text-sm font-bold text-foreground uppercase tracking-wide flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-500" />
+                Atenção Necessária
+              </h2>
               {attention.length === 0 ? (
-                <p className="rounded-xl border border-border/40 bg-muted/15 px-4 py-5 text-center text-sm text-muted-foreground">
-                  Nada pendente por aqui.
-                </p>
+                <div className="rounded-xl border border-border/50 bg-secondary/30 px-4 py-8 text-center flex flex-col items-center gap-2">
+                  <ClipboardList className="h-8 w-8 text-muted-foreground/40" />
+                  <p className="text-sm font-medium text-muted-foreground">
+                    Nenhuma pendência ou erro detectado.
+                  </p>
+                </div>
               ) : (
-                <ul className="space-y-2">
+                <ul className="space-y-3">
                   {attention.map((item) => {
                     const dupValuesLine = duplicateValuesCaption(item.duplicateType, item.duplicateInfo);
                     return (
                     <li
                       key={item.vistoriaId}
-                      className="rounded-2xl border border-border/60 bg-card p-4 shadow-sm"
+                      className="rounded-xl border border-border/80 bg-card p-4 shadow-sm hover:border-primary/40 transition-colors"
                     >
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
                         <div className="min-w-0">
-                          <p className="text-lg font-bold tracking-wide text-foreground">{item.placa}</p>
-                          <p className="text-sm text-muted-foreground">
-                            #{item.numeroVistoria}
-                            {item.vistoriador ? ` · ${item.vistoriador}` : ""}
+                          <p className="text-lg font-black tracking-wider text-foreground">{item.placa}</p>
+                          <p className="text-sm font-medium text-muted-foreground mt-0.5">
+                            ID: #{item.numeroVistoria}
+                            {item.vistoriador ? ` · Vistoriador: ${item.vistoriador}` : ""}
                           </p>
-                          <div className="mt-2 flex flex-wrap gap-1">
+                          <div className="mt-3 flex flex-wrap gap-1.5">
                             {item.reasons.map((r) => (
                               <ReasonChip key={r} reason={r} duplicateType={item.duplicateType} />
                             ))}
                           </div>
                           {dupValuesLine ? (
-                            <p className="mt-1.5 text-[11px] font-medium text-muted-foreground">{dupValuesLine}</p>
+                            <p className="mt-2 text-xs font-semibold text-amber-700 dark:text-amber-400 bg-amber-500/10 inline-block px-2 py-1 rounded-md">{dupValuesLine}</p>
                           ) : null}
                           {item.syncMessage ? (
-                            <p className="mt-2 text-xs leading-snug text-orange-800 dark:text-orange-200">{item.syncMessage}</p>
+                            <p className="mt-2 text-xs font-medium text-destructive bg-destructive/10 inline-block px-2 py-1 rounded-md">{item.syncMessage}</p>
                           ) : null}
                         </div>
-                        <div className="flex flex-wrap items-center gap-2 sm:flex-col sm:items-stretch sm:shrink-0">
+                        <div className="flex flex-col items-stretch gap-2 shrink-0">
                           <Button
                             type="button"
-                            className="h-11 min-h-11 flex-1 rounded-xl text-sm font-semibold sm:min-w-[140px]"
+                            className="h-10 w-full sm:w-[150px] rounded-lg text-sm font-bold shadow-sm"
                             onClick={() => navigate(`/editar/${item.vistoriaId}`)}
                           >
-                            Abrir e corrigir
+                            Abrir e Corrigir
                           </Button>
-                          <div className="flex gap-1">
+                          <div className="grid grid-cols-2 gap-2">
                             <Button
                               type="button"
-                              variant="ghost"
+                              variant="outline"
                               size="sm"
-                              className="h-9 text-xs text-muted-foreground"
+                              className="h-9 text-[11px] font-semibold"
                               onClick={() =>
                                 navigate(`/historico/${id}`, {
                                   state: { focusVistoriaId: item.vistoriaId },
                                 })
                               }
                             >
-                              Ver na lista
+                              Ver Histórico
                             </Button>
                             <Button
                               type="button"
-                              variant="ghost"
+                              variant="secondary"
                               size="sm"
-                              className="h-9 gap-1 text-xs text-muted-foreground"
+                              className="h-9 gap-1.5 text-[11px] font-semibold bg-blue-500/10 text-blue-700 hover:bg-blue-500/20 dark:text-blue-400"
                               disabled={syncingAttention}
                               onClick={() => void handleTrySync()}
                             >
@@ -461,7 +475,7 @@ export default function Dashboard() {
                               ) : (
                                 <RefreshCw className="h-3 w-3" />
                               )}
-                              Tentar enviar
+                              Reenviar
                             </Button>
                           </div>
                         </div>
@@ -477,14 +491,14 @@ export default function Dashboard() {
 
         <Button
           type="button"
-          variant="ghost"
+          variant="outline"
           size="sm"
-          className="h-10 w-full text-xs text-muted-foreground"
+          className="h-12 w-full text-sm font-bold text-muted-foreground border-dashed border-border/60 hover:bg-secondary/50 mt-6"
           onClick={() => void load()}
           disabled={loading}
         >
-          {loading ? <Loader2 className="mr-2 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-2 h-3 w-3" />}
-          Atualizar
+          {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+          Forçar Atualização do Painel
         </Button>
       </div>
 
@@ -513,27 +527,29 @@ function StatCard({
   return (
     <div
       className={cn(
-        "rounded-xl border border-border/60 bg-card/90 p-3 shadow-sm",
-        accent && "ring-1 ring-primary/25",
-        warn && "border-amber-500/40",
-        danger && "border-red-500/35",
+        "flex flex-col justify-between rounded-xl border border-border/80 bg-card p-3.5 shadow-sm transition-all hover:shadow-md",
+        accent && "ring-2 ring-primary/40 border-primary/20",
+        warn && "ring-1 ring-amber-500/50 border-amber-500/30 bg-amber-500/5",
+        danger && "ring-1 ring-red-500/50 border-red-500/30 bg-red-500/5",
       )}
     >
-      <div className="mb-1 flex items-center gap-1.5 text-muted-foreground">
+      <div className="mb-2 flex items-center gap-1.5 text-muted-foreground">
         {icon}
-        <span className="text-[10px] font-bold uppercase tracking-wider">{label}</span>
+        <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">{label}</span>
       </div>
-      <p
-        className={cn(
-          "text-xl font-black tabular-nums sm:text-2xl",
-          accent && "text-primary",
-          danger && "text-red-600 dark:text-red-400",
-          warn && !danger && "text-amber-700 dark:text-amber-300",
-        )}
-      >
-        {value}
-      </p>
-      <p className="text-[10px] text-muted-foreground">{sub}</p>
+      <div>
+        <p
+          className={cn(
+            "text-2xl font-black tabular-nums sm:text-3xl leading-none mb-1",
+            accent && "text-primary",
+            danger && "text-red-600 dark:text-red-400",
+            warn && !danger && "text-amber-600 dark:text-amber-400",
+          )}
+        >
+          {value}
+        </p>
+        <p className="text-[11px] font-medium text-muted-foreground/80 lowercase">{sub}</p>
+      </div>
     </div>
   );
 }
@@ -550,12 +566,14 @@ function MetricRow({
   hint?: string;
 }) {
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-border/50 bg-card/60 px-3 py-2.5">
-      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">{icon}</div>
+    <div className="flex items-center gap-3 rounded-xl border border-border/60 bg-card p-3 shadow-sm">
+      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary">
+        {icon}
+      </div>
       <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-muted-foreground">{label}</p>
-        <p className="truncate text-sm font-semibold text-foreground">{value}</p>
-        {hint ? <p className="text-[11px] leading-snug text-muted-foreground">{hint}</p> : null}
+        <p className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="truncate text-base font-black text-foreground mt-0.5">{value}</p>
+        {hint ? <p className="text-xs font-medium text-muted-foreground/70 mt-0.5">{hint}</p> : null}
       </div>
     </div>
   );
@@ -568,33 +586,33 @@ function ReasonChip({
   reason: AttentionListItem["reasons"][number];
   duplicateType?: AttentionListItem["duplicateType"];
 }) {
-  const dupCls = "bg-orange-500/20 text-orange-900 dark:text-orange-100";
+  const dupCls = "bg-orange-500/15 text-orange-700 dark:text-orange-300 border border-orange-500/30";
   if (
     (reason === "conflito_duplicidade" || reason === "aguardando_ajuste") &&
     duplicateType
   ) {
     return (
-      <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", dupCls)}>
+      <span className={cn("rounded-md px-2 py-1 text-[10px] font-bold uppercase tracking-wide", dupCls)}>
         {duplicateTypeShortLabel(duplicateType)}
       </span>
     );
   }
   const map: Record<AttentionListItem["reasons"][number], { label: string; className: string }> = {
-    erro_sync: { label: "Erro ao enviar", className: "bg-red-500/15 text-red-700 dark:text-red-300" },
+    erro_sync: { label: "Erro ao Enviar", className: "bg-red-500/15 text-red-700 dark:text-red-300 border border-red-500/30" },
     conflito_duplicidade: {
-      label: "Duplicado no servidor",
+      label: "Duplicado no Servidor",
       className: dupCls,
     },
     aguardando_ajuste: {
-      label: "Duplicado — ajuste",
+      label: "Duplicado — Ajuste",
       className: dupCls,
     },
-    foto_falhou: { label: "Foto não foi", className: "bg-amber-400/25 text-amber-950 dark:text-amber-50" },
-    pendente_sync: { label: "A enviar", className: "bg-amber-400/30 text-amber-950 dark:text-amber-50" },
-    fila_com_falha: { label: "Envio travado", className: "bg-red-500/10 text-red-600 dark:text-red-400" },
+    foto_falhou: { label: "Falha na Foto", className: "bg-amber-400/20 text-amber-800 dark:text-amber-200 border border-amber-500/30" },
+    pendente_sync: { label: "Aguardando Envio", className: "bg-blue-500/15 text-blue-700 dark:text-blue-300 border border-blue-500/30" },
+    fila_com_falha: { label: "Envio Travado", className: "bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/30" },
   };
   const m = map[reason];
   return (
-    <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", m.className)}>{m.label}</span>
+    <span className={cn("rounded-md px-2 py-1 text-[10px] font-bold uppercase tracking-wide", m.className)}>{m.label}</span>
   );
 }

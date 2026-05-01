@@ -145,7 +145,13 @@ export default function AuthPage() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-background px-6">
-      <div className="w-full max-w-sm space-y-6">
+      <form 
+        onSubmit={(e) => {
+          e.preventDefault();
+          void handleLogin();
+        }} 
+        className="w-full max-w-sm space-y-6"
+      >
         <div className="flex flex-col items-center gap-2">
           <div className="flex h-14 w-14 items-center justify-center rounded-xl bg-primary">
             {role === 'admin' ? (
@@ -218,7 +224,7 @@ export default function AuthPage() {
         </div>
 
         <Button
-          onClick={() => void handleLogin()}
+          type="submit"
           disabled={
             submitting ||
             listLoading ||
@@ -246,7 +252,7 @@ export default function AuthPage() {
         >
           Voltar
         </button>
-      </div>
+      </form>
     </div>
   );
 }

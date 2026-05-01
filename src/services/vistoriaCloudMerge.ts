@@ -30,7 +30,9 @@ export function shouldPreserveLocalVistoriaFromCloudMerge(v: Vistoria): boolean 
 }
 
 export async function patchVistoriaFromCloudRow(localId: number, row: Record<string, unknown>): Promise<void> {
-  const cloudLeilaoFk = Number(row.leilao);
+  // CORREÇÃO: Lê a coluna leilao_id caso não venha leilao
+  const cloudLeilaoFk = row.leilao_id != null ? Number(row.leilao_id) : Number(row.leilao);
+  
   const localLeilaoId = Number.isFinite(cloudLeilaoFk)
     ? await resolveLocalLeilaoIdForCloudFk(cloudLeilaoFk)
     : undefined;
@@ -59,7 +61,9 @@ export async function patchVistoriaFromCloudRow(localId: number, row: Record<str
 }
 
 export async function applyVistoriaInsert(row: Record<string, unknown>): Promise<void> {
-  const cloudLeilaoFk = Number(row.leilao);
+  // CORREÇÃO: Lê a coluna leilao_id caso não venha leilao
+  const cloudLeilaoFk = row.leilao_id != null ? Number(row.leilao_id) : Number(row.leilao);
+  
   const localLeilaoId = await resolveLocalLeilaoIdForCloudFk(cloudLeilaoFk);
   if (localLeilaoId == null) {
     if (import.meta.env.DEV) {
@@ -145,7 +149,9 @@ export async function mergeCloudRowWithLocalPreservation(
     localId = await findVistoriaIdByCloudId(String(row.id));
   }
 
-  const cloudFk = Number(row.leilao);
+  // CORREÇÃO: Lê a coluna leilao_id caso não venha leilao
+  const cloudFk = row.leilao_id != null ? Number(row.leilao_id) : Number(row.leilao);
+  
   const resolved = Number.isFinite(cloudFk) ? await resolveLocalLeilaoIdForCloudFk(cloudFk) : undefined;
   if (resolved != null && resolved !== localLeilaoId) return;
 
