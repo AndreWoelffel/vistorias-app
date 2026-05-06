@@ -107,6 +107,16 @@ export interface Vistoria {
   duplicateConflictWithList?: VistoriaDuplicateConflictPeer[];
   /** Exclusão na nuvem pendente: registro oculto na listagem até o DELETE sincronizar. */
   pendingCloudDelete?: boolean;
+
+  // ── Hard Example Mining (Active Learning) ─────────────────────────────────
+  /** true se a IA sugeriu uma placa diferente da que o usuário confirmou. */
+  isHardExample?: boolean;
+  /** true se o YOLO não detectou as 7 caixas (placaSugeridaIA.length !== 7). */
+  isYoloError?: boolean;
+  /** true se o YOLO detectou 7 caixas mas a CNN classificou errado. */
+  isCnnError?: boolean;
+  /** Placa que a IA leu originalmente (antes da correção manual do usuário). */
+  placaSugeridaIA?: string;
 }
 
 /** Normaliza legado `pendente` → `pendente_sync` para lógica e UI. */

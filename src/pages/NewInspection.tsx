@@ -48,6 +48,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { processarPlaca } from '@/lib/plateValidator';
 
 type Step = 'placa' | 'numero' | 'fotos' | 'saving';
 type CameraMode = 'placa' | 'numero' | 'chassi' | 'motor' | 'geral' | null;
@@ -72,6 +73,9 @@ export default function NewInspection() {
   // Dados da Vistoria
   const [placa, setPlaca] = useState('');
   const [numero, setNumero] = useState('');
+
+  // Hard Example Mining: guarda o que a IA leu originalmente para detectar correções manuais
+  const [placaOriginalIA, setPlacaOriginalIA] = useState<string | null>(null);
 
   // Fotos Base (Necessárias para o Resumo calcular o total)
   const [fotoPlaca, setFotoPlaca] = useState<Blob | null>(null);
@@ -174,9 +178,10 @@ export default function NewInspection() {
       }
 
       if (type === 'placa') {
-        const match = rawText.match(/[A-Z]{3}[0-9][A-Z0-9][0-9]{2}/);
+        const match = processarPlaca(rawText);
         const finalPlate = match ? match[0] : rawText.slice(0, 7);
         setPlaca(finalPlate);
+        setPlacaOriginalIA(finalPlate);
         const warning = detectOQAmbiguity(finalPlate);
         if (warning) setOqWarning(warning);
       } else {
@@ -243,6 +248,7 @@ export default function NewInspection() {
         if (match) text = match[0];
         const plate = text.slice(0, 7);
         setPlaca(plate);
+        setPlacaOriginalIA(plate);
         const warning = detectOQAmbiguity(plate);
         if (warning) setOqWarning(warning);
       } else {
@@ -379,9 +385,19 @@ export default function NewInspection() {
       if (hasMotor && fotoMotor) allFotos.push(fotoMotor);
 
       const nowMs = Date.now();
+      const finalPlacaUpper = placa.toUpperCase();
+
+      // Hard Example Mining: detecta se o usuário corrigiu a leitura da IA
+      const isHardExample =
+        placaOriginalIA !== null && placaOriginalIA !== finalPlacaUpper;
+      const isYoloError =
+        isHardExample && placaOriginalIA !== null && placaOriginalIA.length !== 7;
+      const isCnnError =
+        isHardExample && placaOriginalIA !== null && placaOriginalIA.length === 7;
+
       const localId = await addVistoria({
         leilaoId: id,
-        placa: placa.toUpperCase(),
+        placa: finalPlacaUpper,
         numeroVistoria: numero,
         vistoriador: user?.nome || '',
         fotos: allFotos,
@@ -391,6 +407,10 @@ export default function NewInspection() {
         localUuid,
         createdBy,
         createdByUserId,
+        isHardExample: isHardExample || undefined,
+        isYoloError: isYoloError || undefined,
+        isCnnError: isCnnError || undefined,
+        placaSugeridaIA: isHardExample && placaOriginalIA ? placaOriginalIA : undefined,
       });
 
       await recalculateDuplicateVistoriasForLeilao(id);

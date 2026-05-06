@@ -94,6 +94,33 @@ export async function fetchAndMergeVistoriasFromCloudForLeilao(
 }
 
 const STORAGE_BUCKET = 'fotos-vistorias';
+const DATASET_BUCKET = 'dataset-minerado';
+
+/**
+ * Faz upload secundário da foto da placa para o bucket de Hard Examples.
+ * Silencia erros: nunca deve bloquear o fluxo principal de sync.
+ */
+async function uploadHardExample(v: Vistoria): Promise<void> {
+  if (!v.isHardExample || !v.placaSugeridaIA) return;
+  const foto = v.fotos?.[0];
+  if (!foto || foto.size <= 0) return;
+
+  const errorType: 'yolo' | 'cnn' = v.isYoloError ? 'yolo' : 'cnn';
+  const timestamp = Date.now();
+  const placaCorreta = v.placa.trim().toUpperCase().replace(/\s+/g, '');
+  const placaIA = v.placaSugeridaIA.trim().toUpperCase().replace(/\s+/g, '');
+  const fileName = `${placaCorreta}_sugerido_${placaIA}_${errorType}_${timestamp}.jpg`;
+
+  try {
+    await supabase.storage
+      .from(DATASET_BUCKET)
+      .upload(`placas/${fileName}`, foto, { contentType: 'image/jpeg', upsert: false });
+  } catch (e) {
+    if (import.meta.env.DEV) {
+      console.warn('[HEM] Falha no upload do hard example:', e);
+    }
+  }
+}
 
 function normPlaca(p: string): string {
   return p.trim().toUpperCase().replace(/\s+/g, '');
@@ -520,7 +547,11 @@ export async function syncInspectionFromLocal(localVistoriaId: number): Promise<
     placa: v.placa, numero_vistoria: v.numeroVistoria, fotoFile: foto && foto.size > 0 ? foto : null, leilaoId: v.leilaoId, vistoriador: v.vistoriador,
     createdBy: v.createdBy ?? undefined, createdByUserId: v.createdByUserId, localUuid, cloudVistoriaId: cloudId && isValidUuid(cloudId) ? cloudId : undefined, localVistoriaId, localUpdatedAtMs: v.updatedAt ?? new Date(v.createdAt).getTime(),
   });
-  if (ok) return 'ok';
+  if (ok) {
+    // Hard Example Mining: upload secundário assíncrono, não bloqueia sync
+    void uploadHardExample(v);
+    return 'ok';
+  }
   
   const v2 = await getVistoriaById(localVistoriaId);
   const ns2 = normalizeVistoriaStatusSync(v2?.statusSync);
