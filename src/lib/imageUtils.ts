@@ -53,7 +53,7 @@ function ensureTF(): Promise<void> {
 
 let yoloModelPromise: Promise<tf.GraphModel | tf.LayersModel | null> | null = null;
 let yoloVistoriasModelPromise: Promise<tf.GraphModel | tf.LayersModel | null> | null = null;
-let cnnModelPromise: Promise<tf.GraphModel | null> | null = null;
+let cnnModelPromise: Promise<tf.GraphModel | tf.LayersModel | null> | null = null;
 
 export async function loadYOLOModel(): Promise<tf.GraphModel | tf.LayersModel | null> {
   await ensureTF();
@@ -95,16 +95,21 @@ export async function loadYOLOVistoriasModel(): Promise<tf.GraphModel | tf.Layer
   return yoloVistoriasModelPromise;
 }
 
-export async function loadCNNModel(): Promise<tf.GraphModel | null> {
+export async function loadCNNModel(): Promise<tf.GraphModel | tf.LayersModel | null> {
   await ensureTF();
   if (!cnnModelPromise) {
     cnnModelPromise = (async () => {
       try {
-        const model = await tf.loadGraphModel('/model_cnn/model.json');
-        return model;
-      } catch (e) {
-        console.error('[ALPR CNN] Falha ao carregar a CNN', e);
-        return null;
+        // Tenta carregar como Graph (Padrão YOLO)
+        return await tf.loadGraphModel('/model_cnn/model.json');
+      } catch (e1) {
+        try {
+          // Se falhar, tenta carregar como Layers (Padrão Keras/CNN)
+          return await tf.loadLayersModel('/model_cnn/model.json');
+        } catch (e2) {
+          console.error('[ALPR CNN] Falha crítica ao carregar a CNN', e2);
+          return null;
+        }
       }
     })();
   }
@@ -371,8 +376,19 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     if (!isDuplicate) filtered.push(box);
   }
 
-  const plateBoxes = filtered.filter(b => b.classIndex === 1);
+  let plateBoxes = filtered.filter(b => b.classIndex === 1);
   let charBoxes = filtered.filter(b => b.classIndex === 0);
+
+  // --- 🛡️ MÁGICA DO ARQUITETO: Auto-correção de Classes Invertidas ---
+  // Uma placa de carro NUNCA terá mais Placas do que Caracteres.
+  // Se isso acontecer, significa que o Roboflow inverteu os IDs no treinamento.
+  if (plateBoxes.length > charBoxes.length) {
+    console.warn("[ALPR] Classes invertidas detectadas pelo sistema! Destrocando...");
+    const temp = plateBoxes;
+    plateBoxes = charBoxes;
+    charBoxes = temp;
+  }
+  // -------------------------------------------------------------------
 
   if (plateBoxes.length > 0) {
     const mainPlate = plateBoxes[0];
@@ -597,7 +613,7 @@ export async function runPlatePipelineYOLO(
   canvas.height = YOLO_INPUT_SIZE;
   const ctx = canvas.getContext('2d')!;
 
-  ctx.fillStyle = '#727272';
+  ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
 
   const gain = Math.min(YOLO_INPUT_SIZE / origW, YOLO_INPUT_SIZE / origH);

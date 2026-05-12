@@ -91,11 +91,31 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
       if (!videoRef.current || !canvasRef.current) return resolve(null);
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
       const ctx = canvas.getContext('2d');
       if (!ctx) return resolve(null);
-      ctx.drawImage(video, 0, 0);
+
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+
+      // Se a câmera estiver no modo placa ou número (onde tem o overlay na tela)
+      if (overlayType === 'plate' || overlayType === 'number') {
+        // Fazemos um crop quadrado exato no centro do vídeo
+        const cropSize = Math.min(vw, vh); // Pega a menor dimensão (geralmente a largura no celular)
+        const startX = (vw - cropSize) / 2;
+        const startY = (vh - cropSize) / 2;
+
+        canvas.width = cropSize;
+        canvas.height = cropSize;
+        
+        // Recorta apenas o miolo do vídeo e joga no canvas
+        ctx.drawImage(video, startX, startY, cropSize, cropSize, 0, 0, cropSize, cropSize);
+      } else {
+        // Fotos gerais (motor, chassi) pegam a imagem inteira normalmente
+        canvas.width = vw;
+        canvas.height = vh;
+        ctx.drawImage(video, 0, 0);
+      }
+
       canvas.toBlob((blob) => {
         if (blob) {
           resolve({ blob, dataUrl: canvas.toDataURL('image/jpeg', 0.85) });
