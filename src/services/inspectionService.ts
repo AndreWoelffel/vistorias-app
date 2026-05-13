@@ -44,7 +44,9 @@ async function ensureLeilaoSupabaseId(localLeilaoId: number): Promise<number | n
   if (!Number.isFinite(localLeilaoId) || localLeilaoId <= 0) return null;
   const leilao = await getLeilaoById(localLeilaoId);
   if (!leilao) return null;
-  if (leilao.supabaseId != null) return leilao.supabaseId;
+  
+  // MÁGICA DO ARQUITETO 1: Bloqueio explícito contra o NaN
+  if (leilao.supabaseId != null && !Number.isNaN(leilao.supabaseId)) return leilao.supabaseId;
 
   const snap = await getCreatedBySnapshot();
   const createdBy = leilao.createdBy?.trim() || snap.displayName;
@@ -58,6 +60,9 @@ async function ensureLeilaoSupabaseId(localLeilaoId: number): Promise<number | n
   if (error || data?.id == null) return null;
 
   const sid = Number(data.id);
+  // MÁGICA DO ARQUITETO 2: Se o banco devolver lixo, não deixamos virar NaN
+  if (Number.isNaN(sid)) return null; 
+
   const uAt = supabaseTimestampToMs((data as { updated_at?: string | null }).updated_at);
   try {
     await updateLeilao(localLeilaoId, {
@@ -77,8 +82,10 @@ export async function fetchAndMergeVistoriasFromCloudForLeilao(
 ): Promise<{ ok: boolean; rowCount: number }> {
   const leilao = await getLeilaoById(localLeilaoId);
   if (!leilao) return { ok: false, rowCount: 0 };
+  
   const fk = leilao.supabaseId;
-  if (fk == null) return { ok: false, rowCount: 0 };
+  // MÁGICA DO ARQUITETO 3: Impede a busca fantasma se for NaN
+  if (fk == null || Number.isNaN(fk)) return { ok: false, rowCount: 0 };
 
   const { data, error } = await supabase
     .from('vistorias_com_leilao')
@@ -491,7 +498,8 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
 
     const insRow = ins as { id?: string; updated_at?: string | null } | null;
     
-    if (insRow?.id && fkToLink != null) {
+    // MÁGICA DO ARQUITETO 4: A barreira final antes de mandar pro Supabase
+    if (insRow?.id && fkToLink != null && !Number.isNaN(fkToLink)) {
       const { error: relError } = await supabase.from('vistorias_leiloes').insert({
         vistoria_id: insRow.id,
         leilao_id: fkToLink

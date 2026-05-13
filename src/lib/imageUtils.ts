@@ -483,18 +483,59 @@ function preprocessCharacterCanvas(sourceCanvas: HTMLCanvasElement, targetSize: 
     data[i] = erodedData[i];
   }
   ctx.putImageData(imageData, 0, 0);
-
+  // --- MÁGICA DO ARQUITETO 2: Dilatação Morfológica ---
+  // Substitui a antiga Erosão que afinava as letras. 
+  // Agora, se um pixel branco estiver encostado em um preto, ele vira preto.
+  const dilatedData = new Uint8ClampedArray(data);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (y * width + x) * 4;
+      
+      if (data[idx] === 255) { // Se o pixel atual for branco (fundo)
+        const topIdx = ((y - 1) * width + x) * 4;
+        const bottomIdx = ((y + 1) * width + x) * 4;
+        const leftIdx = (y * width + (x - 1)) * 4;
+        const rightIdx = (y * width + (x + 1)) * 4;
+        
+        // Se qualquer vizinho for preto (letra), "engorda" a letra
+        if (data[topIdx] === 0 || data[bottomIdx] === 0 || data[leftIdx] === 0 || data[rightIdx] === 0) {
+          dilatedData[idx] = dilatedData[idx + 1] = dilatedData[idx + 2] = 0;
+        }
+      }
+    }
+  }
+  for (let i = 0; i < data.length; i++) {
+    data[i] = dilatedData[i];
+  }
+  ctx.putImageData(imageData, 0, 0);
+  // ----------------------------------------------------
+  // Cria o tensor final que a CNN vai ler
   const finalCanvas = document.createElement('canvas');
   finalCanvas.width = targetSize;
   finalCanvas.height = targetSize;
   const finalCtx = finalCanvas.getContext('2d')!;
 
+  // 1. Fundo Branco absoluto (Exatamente igual ao seu dataset)
   finalCtx.fillStyle = '#FFFFFF';
   finalCtx.fillRect(0, 0, targetSize, targetSize);
 
-  const margin = Math.floor(targetSize * 0.15);
-  const drawSize = targetSize - margin * 2;
-  finalCtx.drawImage(sourceCanvas, margin, margin, drawSize, drawSize);
+  // 2. Margem de respiro 
+  const margin = targetSize * 0.15;
+  const maxDrawSize = targetSize - (margin * 2);
+
+  // 3. A MÁGICA DA PROPORÇÃO: Calcula a escala sem distorcer a letra!
+  const scale = Math.min(maxDrawSize / sourceCanvas.width, maxDrawSize / sourceCanvas.height);
+  const drawW = sourceCanvas.width * scale;
+  const drawH = sourceCanvas.height * scale;
+
+  // 4. Centraliza a letra perfeitamente no meio do fundo branco
+  const dx = (targetSize - drawW) / 2;
+  const dy = (targetSize - drawH) / 2;
+
+  // 5. Desenha mantendo a suavidade do redimensionamento
+  finalCtx.imageSmoothingEnabled = true;
+  finalCtx.imageSmoothingQuality = 'high';
+  finalCtx.drawImage(sourceCanvas, dx, dy, drawW, drawH);
 
   return finalCanvas;
 }
@@ -506,10 +547,12 @@ function cropAndPrepareForCNN(
   box: YOLOBox
 ): { tensor: tf.Tensor4D; debugUrl: string } {
   const { x, y, w, h } = box;
+
   const x1 = Math.max(0, Math.floor(x));
   const y1 = Math.max(0, Math.floor(y));
   const x2 = Math.min(origW, Math.ceil(x + w));
   const y2 = Math.min(origH, Math.ceil(y + h));
+  
   const cropW = Math.max(1, x2 - x1);
   const cropH = Math.max(1, y2 - y1);
 
@@ -656,6 +699,16 @@ export async function runPlatePipelineYOLO(
     const result = await predictCharWithCNN(cnn, tensor, i);
     charResults.push(result);
   }
+
+  // --- MÁGICA DO ARQUITETO: O Raio-X da CNN ---
+  const rawPlaca = charResults.map((r) => r.char).join('');
+  console.log('=========================================');
+  console.log(`[ALPR DEBUG] PLACA BRUTA LIDA: ${rawPlaca}`);
+  charResults.forEach((r, idx) => {
+    console.log(`Posição ${idx + 1}: ${r.char} (Confiança: ${r.confidence.toFixed(2)}%)`);
+  });
+  console.log('=========================================');
+  // ---------------------------------------------
 
   let plateText = charResults.map((r) => r.char).join('');
   const avgConf =

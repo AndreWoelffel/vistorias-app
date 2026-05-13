@@ -178,8 +178,7 @@ export default function NewInspection() {
       }
 
       if (type === 'placa') {
-        const match = processarPlaca(rawText);
-        const finalPlate = match ? match[0] : rawText.slice(0, 7);
+        const finalPlate = processarPlaca(rawText).slice(0, 7);
         setPlaca(finalPlate);
         setPlacaOriginalIA(finalPlate);
         const warning = detectOQAmbiguity(finalPlate);
@@ -244,9 +243,7 @@ export default function NewInspection() {
       }
 
       if (type === 'placa') {
-        const match = text.match(/[A-Z]{3}[0-9][A-Z0-9][0-9]{2}/);
-        if (match) text = match[0];
-        const plate = text.slice(0, 7);
+        const plate = processarPlaca(text).slice(0, 7);
         setPlaca(plate);
         setPlacaOriginalIA(plate);
         const warning = detectOQAmbiguity(plate);

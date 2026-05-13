@@ -234,7 +234,9 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     if (item.type === 'update') {
       const leilao = await getLeilaoById(localId);
       if (!leilao || leilao.deleted) return 'done';
-      if (leilao.supabaseId == null) return 'skip';
+      
+      // MÁGICA DO ARQUITETO 1: Barreira contra o fantasma do NaN no banco local
+      if (leilao.supabaseId == null || Number.isNaN(leilao.supabaseId)) return 'skip';
 
       const { data: serverRow, error: fetchErr } = await supabase
         .from('leiloes')
@@ -278,7 +280,9 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
 
     if (item.type === 'delete') {
       const leilao = await getLeilaoById(localId);
-      if (!leilao || leilao.supabaseId == null) return 'done';
+      
+      // MÁGICA DO ARQUITETO 2: Impede o envio de um ID inválido para deleção na nuvem
+      if (!leilao || leilao.supabaseId == null || Number.isNaN(leilao.supabaseId)) return 'done';
       if (leilao.deleteBlocked) return 'skip';
       
       const { error } = await supabase.from('leiloes').delete().eq('id', leilao.supabaseId);
