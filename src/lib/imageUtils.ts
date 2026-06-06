@@ -195,135 +195,10 @@ export interface BoundingBox {
   h: number;
 }
 
-const STICKER_YOLO_CONF_THRESHOLD = 0.1;
-
-async function decodeYOLOAdesivo(
-  output: tf.Tensor,
-  gain: number,
-  padX: number,
-  padY: number
-): Promise<BoundingBox | null> {
-  const tensor = tf.tidy(() => {
-    let t = output.squeeze();
-    if (t.shape[0] === 5) t = t.transpose([1, 0]);
-    return t;
-  });
-
-  // Trocado arraySync() por array() para não congelar a UI do celular
-  const data = await tensor.array() as number[][];
-  tensor.dispose();
-
-  let bestConf = 0;
-  let bestBox: BoundingBox | null = null;
-
-  for (const row of data) {
-    const cx = row[0] ?? 0;
-    const cy = row[1] ?? 0;
-    const w = row[2] ?? 0;
-    const h = row[3] ?? 0;
-    const conf = row[4] ?? 0;
-    if (conf > STICKER_YOLO_CONF_THRESHOLD) {
-      if (conf > bestConf) {
-        bestConf = conf;
-        bestBox = {
-          x: Math.max(0, (cx - padX) / gain - (w / gain) / 2),
-          y: Math.max(0, (cy - padY) / gain - (h / gain) / 2),
-          w: w / gain,
-          h: h / gain,
-        };
-      }
-    }
-  }
-  return bestBox;
-}
-
-export async function detectStickerBox(blob: Blob): Promise<BoundingBox | null> {
-  const yolo = await loadYOLOVistoriasModel();
-  if (!yolo) return null;
-
-  const img = await createImageBitmap(blob);
-  const origW = img.width;
-  const origH = img.height;
-
-  const canvas = document.createElement('canvas');
-  canvas.width = YOLO_INPUT_SIZE;
-  canvas.height = YOLO_INPUT_SIZE;
-  const ctx = canvas.getContext('2d')!;
-  ctx.fillStyle = '#727272';
-  ctx.fillRect(0, 0, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
-
-  const gain = Math.min(YOLO_INPUT_SIZE / origW, YOLO_INPUT_SIZE / origH);
-  const padX = (YOLO_INPUT_SIZE - origW * gain) / 2;
-  const padY = (YOLO_INPUT_SIZE - origH * gain) / 2;
-  ctx.drawImage(img, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
-
-  const inputTensor = tf.browser.fromPixels(canvas, 3).expandDims(0).toFloat().div(255.0) as unknown as tf.Tensor4D;
-  const out = yolo.predict(inputTensor) as tf.Tensor;
-  const rawOut = Array.isArray(out) ? out[0] : out;
-  
-  const box = await decodeYOLOAdesivo(rawOut, gain, padX, padY);
-  
-  // Limpeza rígida para não causar Memory Leak
-  if (Array.isArray(out)) out.forEach(t => t.dispose());
-  else out.dispose();
-  inputTensor.dispose();
-  if (typeof img.close === 'function') img.close();
-
-  return box;
-}
-
-export interface ExtractStickerOptions {
-  onDebugBinarized?: (dataUrl: string) => void;
-}
-
-function binarizeStickerCanvasForOCR(canvas: HTMLCanvasElement, threshold = 150): void {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const { width, height } = canvas;
-  const imgData = ctx.getImageData(0, 0, width, height);
-  const d = imgData.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const gray = 0.299 * d[i]! + 0.587 * d[i + 1]! + 0.114 * d[i + 2]!;
-    const v = gray > threshold ? 255 : 0;
-    d[i] = d[i + 1] = d[i + 2] = v;
-    d[i + 3] = 255;
-  }
-  ctx.putImageData(imgData, 0, 0);
-}
-
-export function extractAndPrepareSticker(
-  source: HTMLImageElement | HTMLCanvasElement,
-  box: BoundingBox,
-  options?: ExtractStickerOptions
-): HTMLCanvasElement {
-  const PADDING = 20;
-  const SCALE = 3;
-
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-
-  if (!ctx) throw new Error('Não foi possível iniciar o contexto do Canvas.');
-
-  canvas.width = (box.w + PADDING * 2) * SCALE;
-  canvas.height = (box.h + PADDING * 2) * SCALE;
-
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  ctx.drawImage(
-    source,
-    box.x, box.y, box.w, box.h,
-    PADDING * SCALE, PADDING * SCALE, box.w * SCALE, box.h * SCALE
-  );
-
-  binarizeStickerCanvasForOCR(canvas, 150);
-
-  if (options?.onDebugBinarized) {
-    options.onDebugBinarized(canvas.toDataURL('image/png'));
-  }
-
-  return canvas;
-}
+// ── Pipeline de adesivo migrado para runStickerPipelineYOLO ─────────────────
+// O modelo `model_yolo_vistorias` agora tem 2 classes (shape [1,6,8400]),
+// idêntico ao modelo de placas. decodeYOLOOutput + runStickerPipelineYOLO
+// substituem completamente detectStickerBox / extractAndPrepareSticker.
 
 export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: number, padY: number): Promise<YOLOBox[]> {
   const tensor = tf.tidy(() => {
@@ -349,9 +224,7 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
       }
     }
 
-    const threshold = (detectedClass === 0) ? 0.25 : 0.45;
-
-    if (maxConf > threshold) {
+    if (maxConf > 0.08) {
       const cx = row[0], cy = row[1], w = row[2], h = row[3];
       rawBoxes.push({
         x: Math.max(0, (cx - padX) / gain - (w / gain) / 2),
@@ -364,68 +237,71 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     }
   }
 
-  const filtered: YOLOBox[] = [];
+  console.log(`[YOLO DEBUG 1] Caixas brutas totais (Conf > 0.08): ${rawBoxes.length}`);
+
+  // 1. Identificação dinâmica de classes ANTES do NMS (Roboflow pode inverter IDs).
+  const rawC0 = rawBoxes.filter(b => b.classIndex === 0);
+  const rawC1 = rawBoxes.filter(b => b.classIndex === 1);
+  const meanArea = (boxes: YOLOBox[]) =>
+    boxes.length === 0 ? 0 : boxes.reduce((s, b) => s + b.w * b.h, 0) / boxes.length;
+  const charClassId = meanArea(rawC0) <= meanArea(rawC1) ? 0 : 1;
+  const plateClassId = charClassId === 0 ? 1 : 0;
+
+  console.log(`[YOLO DEBUG 2] Classe do Adesivo: ${plateClassId} | Classe do Caractere: ${charClassId}`);
+
+  // 2. NMS — distância entre centros para caracteres; IoU para o adesivo
   rawBoxes.sort((a, b) => b.confidence - a.confidence);
+  const filtered: YOLOBox[] = [];
   for (const box of rawBoxes) {
     const isDuplicate = filtered.some(other => {
       if (box.classIndex === other.classIndex) {
-        return calculateIoU(box, other) > 0.45;
+        if (box.classIndex === charClassId) {
+          const boxCX = box.x + box.w / 2;
+          const boxCY = box.y + box.h / 2;
+          const otherCX = other.x + other.w / 2;
+          const otherCY = other.y + other.h / 2;
+
+          const distX = Math.abs(boxCX - otherCX);
+          const distY = Math.abs(boxCY - otherCY);
+
+          if (distX < box.w * 0.5 && distY < box.h * 0.5) {
+            return true;
+          }
+          return calculateIoU(box, other) > 0.85;
+        } else {
+          return calculateIoU(box, other) > 0.45;
+        }
       }
       return false;
     });
     if (!isDuplicate) filtered.push(box);
   }
 
-  let plateBoxes = filtered.filter(b => b.classIndex === 1);
-  let charBoxes = filtered.filter(b => b.classIndex === 0);
+  console.log(`[YOLO DEBUG 3] Sobreviveram à tesoura do NMS: ${filtered.length} caixas totais`);
 
-  // --- 🛡️ MÁGICA DO ARQUITETO: Auto-correção de Classes Invertidas ---
-  // Uma placa de carro NUNCA terá mais Placas do que Caracteres.
-  // Se isso acontecer, significa que o Roboflow inverteu os IDs no treinamento.
-  if (plateBoxes.length > charBoxes.length) {
-    console.warn("[ALPR] Classes invertidas detectadas pelo sistema! Destrocando...");
-    const temp = plateBoxes;
-    plateBoxes = charBoxes;
-    charBoxes = temp;
-  }
-  // -------------------------------------------------------------------
+  // 3. Atribuição final pós-NMS
+  let plateBoxes = filtered.filter(b => b.classIndex === plateClassId);
+  let charBoxes = filtered.filter(b => b.classIndex === charClassId);
+
+  console.log(`[YOLO DEBUG 4] Adesivos separados: ${plateBoxes.length} | Caracteres separados: ${charBoxes.length}`);
 
   if (plateBoxes.length > 0) {
     const mainPlate = plateBoxes[0];
-    const isMotoPlate = (mainPlate.w / mainPlate.h) <= 2.2;
-    const minCharHeight = isMotoPlate ? (mainPlate.h * 0.2) : (mainPlate.h * 0.35);
-
+    const marginX = mainPlate.w * 0.15;
+    const marginY = mainPlate.h * 0.15;
     charBoxes = charBoxes.filter(char => {
       const charCX = char.x + char.w / 2;
       const charCY = char.y + char.h / 2;
       const isInside =
-        charCX >= mainPlate.x &&
-        charCX <= mainPlate.x + mainPlate.w &&
-        charCY >= mainPlate.y &&
-        charCY <= mainPlate.y + mainPlate.h;
-      const isTallEnough = char.h >= minCharHeight;
-      return isInside && isTallEnough;
+        charCX >= mainPlate.x - marginX &&
+        charCX <= mainPlate.x + mainPlate.w + marginX &&
+        charCY >= mainPlate.y - marginY &&
+        charCY <= mainPlate.y + mainPlate.h + marginY;
+      return isInside;
     });
   }
 
-  if (charBoxes.length >= 3) {
-    const charBoxesBeforeConsensus = charBoxes;
-    try {
-      const heights = charBoxes.map(b => b.h);
-      const medianHeight = getMedian(heights);
-
-      const minAcceptableHeight = medianHeight * 0.7;
-      const maxAcceptableHeight = medianHeight * 1.3;
-      const afterConsensus = charBoxes.filter(char => {
-        return char.h >= minAcceptableHeight && char.h <= maxAcceptableHeight;
-      });
-      charBoxes = afterConsensus.length > 0 ? afterConsensus : charBoxesBeforeConsensus;
-    } catch (e) {
-      charBoxes = charBoxesBeforeConsensus;
-    }
-  }
-
-  charBoxes = charBoxes.filter(b => b.h > b.w);
+  console.log(`[YOLO DEBUG 5] Caracteres válidos (DENTRO do adesivo): ${charBoxes.length}`);
 
   charBoxes.sort((a, b) => {
     const yDiff = a.y - b.y;
@@ -736,6 +612,131 @@ export async function runPlatePipelineYOLO(
     debugImage,
     charDebugImages,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Pipeline de Adesivo (YOLO 2-classes + Tesseract PSM 10 por dígito)
+// ─────────────────────────────────────────────────────────────────────────────
+// Modelo: model_yolo_vistorias  |  Shape: [1, 6, 8400]
+//   classe 0 = dígito isolado (char)
+//   classe 1 = adesivo (bounding box pai)
+// decodeYOLOOutput filtra chars dentro do adesivo, aplica NMS e ordena.
+// ═══════════════════════════════════════════════════════════════════════════════
+export async function runStickerPipelineYOLO(
+  blob: Blob
+): Promise<{ text: string; confidence: number; debugImage?: string; charDebugImages?: string[] } | null> {
+  const yolo = await loadYOLOVistoriasModel();
+  if (!yolo) return null;
+
+  const img = await createImageBitmap(blob);
+  const origW = img.width, origH = img.height;
+
+  // ── 1. Letterbox (mesmo padrão do pipeline de placas) ────────────────────
+  const yoloCanvas = document.createElement('canvas');
+  yoloCanvas.width = YOLO_INPUT_SIZE;
+  yoloCanvas.height = YOLO_INPUT_SIZE;
+  const yoloCtx = yoloCanvas.getContext('2d')!;
+  yoloCtx.fillStyle = '#727272';
+  yoloCtx.fillRect(0, 0, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
+  const gain = Math.min(YOLO_INPUT_SIZE / origW, YOLO_INPUT_SIZE / origH);
+  const padX = (YOLO_INPUT_SIZE - origW * gain) / 2;
+  const padY = (YOLO_INPUT_SIZE - origH * gain) / 2;
+  yoloCtx.drawImage(img, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
+
+  // ── 2. Inferência YOLO ───────────────────────────────────────────────────
+  const inputTensor = tf.browser.fromPixels(yoloCanvas, 3)
+    .expandDims(0).toFloat().div(255.0) as unknown as tf.Tensor4D;
+  const output = yolo.predict(inputTensor) as tf.Tensor;
+  const rawOut = Array.isArray(output) ? output[0] : output;
+
+  const charBoxes = await decodeYOLOOutput(rawOut, gain, padX, padY);
+
+  if (Array.isArray(output)) output.forEach(t => t.dispose());
+  else output.dispose();
+  inputTensor.dispose();
+
+  if (charBoxes.length === 0) {
+    if (typeof img.close === 'function') img.close();
+    return { text: '', confidence: 0, debugImage: '', charDebugImages: [] };
+  }
+
+  // ── 3. Canvas fonte na resolução original ────────────────────────────────
+  const srcCanvas = document.createElement('canvas');
+  srcCanvas.width = origW;
+  srcCanvas.height = origH;
+  srcCanvas.getContext('2d')!.drawImage(img, 0, 0);
+  if (typeof img.close === 'function') img.close();
+
+  // ── 4. imageData + ordenação esquerda → direita ──────────────────────────
+  // imageDataObj é extraído uma única vez e reutilizado no overlay (passo 7).
+  const srcCtx = srcCanvas.getContext('2d')!;
+  const imageDataObj = srcCtx.getImageData(0, 0, origW, origH);
+  const sorted = charBoxes.slice(0, 5).sort((a, b) => a.x - b.x);
+
+  // ── 5. cropAndPrepareForCNN + Tesseract PSM 10 (um dígito por caixa) ────
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker('eng', 1, { logger: () => {} });
+  await worker.setParameters({
+    tessedit_char_whitelist: '0123456789',
+    tessedit_pageseg_mode: '10',
+  } as Record<string, string>);
+
+  const charDebugImages: string[] = [];
+  let stickerText = '';
+  const confidences: number[] = [];
+  const charResults: { char: string; confidence: number }[] = [];
+
+  try {
+    for (const box of sorted) {
+      const { tensor, debugUrl } = cropAndPrepareForCNN(imageDataObj.data, origW, origH, box);
+      tensor.dispose();
+      charDebugImages.push(debugUrl);
+
+      const { data } = await worker.recognize(debugUrl);
+      const digit = data.text.replace(/\s/g, '').replace(/\D/g, '').slice(0, 1) || '?';
+      charResults.push({ char: digit, confidence: data.confidence });
+      stickerText += digit;
+      confidences.push(data.confidence);
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  const text = stickerText;
+  const avgConf = confidences.length > 0
+    ? confidences.reduce((s, c) => s + c, 0) / confidences.length
+    : 0;
+
+  if (import.meta.env.DEV) {
+    console.log('[STICKER YOLO] =========================================');
+    console.log(`[STICKER YOLO] NÚMERO LIDO: "${text}" | Conf: ${avgConf.toFixed(1)}%`);
+    charResults.forEach((r, i) =>
+      console.log(`  Dígito ${i + 1}: "${r.char}" (${r.confidence.toFixed(1)}%)`)
+    );
+    console.log('[STICKER YOLO] =========================================');
+  }
+
+  // ── 6. Debug overlay com bounding boxes verdes ───────────────────────────
+  const debugOut = document.createElement('canvas');
+  debugOut.width = origW;
+  debugOut.height = origH;
+  const dctx = debugOut.getContext('2d')!;
+  dctx.putImageData(imageDataObj, 0, 0);
+  dctx.strokeStyle = 'lime';
+  dctx.lineWidth = 2;
+  sorted.forEach((b, i) => {
+    dctx.strokeRect(b.x, b.y, b.w, b.h);
+    dctx.fillStyle = '#00FF00';
+    dctx.font = 'bold 14px monospace';
+    dctx.fillText(
+      charResults[i]?.char ?? '?',
+      b.x + 2,
+      b.y > 18 ? b.y - 3 : b.y + b.h + 13
+    );
+  });
+  const debugImage = debugOut.toDataURL('image/png');
+
+  return { text, confidence: avgConf, debugImage, charDebugImages };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1068,6 +1069,58 @@ function cropToOverlay(
 // ═══════════════════════════════════════════════════════════════════════════════
 // Full Preprocessing Pipeline 
 // ═══════════════════════════════════════════════════════════════════════════════
+/**
+ * Estima o ângulo de inclinação (skew) diretamente sobre os pixels de um canvas
+ * usando o método dos momentos de imagem, com amostragem para eficiência.
+ * Usado por `preprocessAdvanced` antes da binarização de adesivos.
+ */
+function computeImageDataSkewDeg(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number
+): number {
+  // Amostragem: reduz o número de pixels visitados em imagens grandes
+  const step = Math.max(1, Math.floor(Math.sqrt(width * height) / 250));
+
+  let brightnessSum = 0, sampleCount = 0;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * 4;
+      brightnessSum += 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
+      sampleCount++;
+    }
+  }
+  const avg = brightnessSum / Math.max(1, sampleCount);
+  const isDark = avg < 128;
+
+  let sumX = 0, sumY = 0, count = 0;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * 4;
+      const g = 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
+      if (isDark ? g > avg : g < avg) { sumX += x; sumY += y; count++; }
+    }
+  }
+  if (count < 50) return 0;
+
+  const cx = sumX / count, cy = sumY / count;
+  let mu20 = 0, mu02 = 0, mu11 = 0;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      const i = (y * width + x) * 4;
+      const g = 0.299 * data[i]! + 0.587 * data[i + 1]! + 0.114 * data[i + 2]!;
+      if (isDark ? g > avg : g < avg) {
+        const dx = x - cx, dy = y - cy;
+        mu20 += dx * dx; mu02 += dy * dy; mu11 += dx * dy;
+      }
+    }
+  }
+  if (mu20 + mu02 < 1) return 0;
+
+  const deg = 0.5 * Math.atan2(2 * mu11, mu20 - mu02) * (180 / Math.PI);
+  return Math.max(-15, Math.min(15, deg));
+}
+
 async function preprocessAdvanced(
   blob: Blob,
   cropType: 'plate' | 'number' | undefined,
@@ -1095,6 +1148,31 @@ async function preprocessAdvanced(
 
         const w = canvas.width, h = canvas.height;
         const freshCtx = canvas.getContext('2d')!;
+
+        // ── Deskewing (somente não-placa; plates usam perspectiveWarp) ────
+        // Corrige inclinação do adesivo antes da binarização adaptativa,
+        // garantindo que o Tesseract receba linhas de texto alinhadas.
+        if (cropType !== 'plate') {
+          const rawImg = freshCtx.getImageData(0, 0, w, h);
+          const skewDeg = computeImageDataSkewDeg(rawImg.data, w, h);
+          if (Math.abs(skewDeg) >= 0.5) {
+            const tmp = document.createElement('canvas');
+            tmp.width = w; tmp.height = h;
+            const tmpCtx = tmp.getContext('2d')!;
+            tmpCtx.fillStyle = '#FFFFFF';
+            tmpCtx.fillRect(0, 0, w, h);
+            tmpCtx.save();
+            tmpCtx.translate(w / 2, h / 2);
+            tmpCtx.rotate(-skewDeg * Math.PI / 180);
+            tmpCtx.drawImage(canvas, -w / 2, -h / 2);
+            tmpCtx.restore();
+            freshCtx.drawImage(tmp, 0, 0);
+            if (import.meta.env.DEV) {
+              console.log(`[Deskew] Corrigido ${skewDeg.toFixed(1)}°`);
+            }
+          }
+        }
+
         let imageData = freshCtx.getImageData(0, 0, w, h);
 
         const winSize = computeAdaptiveWindowSize(h);

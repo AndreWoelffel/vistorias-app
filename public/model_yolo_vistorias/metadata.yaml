@@ -1,7 +1,7 @@
-description: Ultralytics best model trained on D:/Laudos_GDL/App_Vistoria/treinamento_ia/dataset_yolo_vistoria/data.yaml
+description: Ultralytics best model trained on /content/dataset/data.yaml
 author: Ultralytics
-date: '2026-03-14T11:07:22.238792'
-version: 8.4.21
+date: '2026-05-30T21:07:30.675689'
+version: 8.4.57
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com
 stride: 32
@@ -11,9 +11,12 @@ imgsz:
 - 640
 - 640
 names:
-  0: numeros
+  0: adesivo
+  1: numeros
 args:
+  data: null
   batch: 1
+  fraction: 1.0
   half: false
   int8: false
   nms: false

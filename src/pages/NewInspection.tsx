@@ -29,10 +29,8 @@ import {
   compressImage,
   detectOQAmbiguity,
   preloadAlprModels,
-  detectStickerBox,
-  extractAndPrepareSticker,
+  runStickerPipelineYOLO,
 } from '@/lib/imageUtils';
-import { readStickerNumber } from '@/services/ocrService';
 import { useAuth } from '@/hooks/useAuth';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
@@ -103,6 +101,8 @@ export default function NewInspection() {
   const [ocrConfidence, setOcrConfidence] = useState<number | null>(null);
   const [stickerLoading, setStickerLoading] = useState(false);
   const [stickerOcrDebugUrl, setStickerOcrDebugUrl] = useState<string | null>(null);
+  const [stickerCharDebugImages, setStickerCharDebugImages] = useState<string[]>([]);
+  const [stickerOcrConfidence, setStickerOcrConfidence] = useState<number | null>(null);
 
   const [showCancelDialog, setShowCancelDialog] = useState(false);
 
@@ -265,31 +265,23 @@ export default function NewInspection() {
   const handleStickerCapture = useCallback(async (blob: Blob) => {
     setCameraMode(null);
     setStickerLoading(true);
-    setDebugImage(null);
-    setFotoAdesivo(blob); // Salva a foto bruta para envio
-    
+    setStickerOcrDebugUrl(null);
+    setStickerCharDebugImages([]);
+    setStickerOcrConfidence(null);
+    setFotoAdesivo(blob);
+
     try {
-      const box = await detectStickerBox(blob);
-      if (!box) {
+      const result = await runStickerPipelineYOLO(blob);
+
+      if (!result || result.text.length === 0) {
         toast({ ...fieldToasts.adesivoNaoViu, variant: 'destructive' });
         return;
       }
-      
-      const img = await createImageBitmap(blob);
-      const sourceCanvas = document.createElement('canvas');
-      sourceCanvas.width = img.width;
-      sourceCanvas.height = img.height;
-      sourceCanvas.getContext('2d')!.drawImage(img, 0, 0);
-      if (typeof img.close === 'function') img.close();
 
-      const stickerCanvas = extractAndPrepareSticker(sourceCanvas, box, {
-        onDebugBinarized: (url) => {
-          if (debugMode) setStickerOcrDebugUrl(url);
-        },
-      });
-      
-      const text = await readStickerNumber(stickerCanvas);
-      setNumero(text ?? '');
+      if (result.debugImage) setStickerOcrDebugUrl(result.debugImage);
+      if (result.charDebugImages) setStickerCharDebugImages(result.charDebugImages);
+      setStickerOcrConfidence(result.confidence);
+      setNumero(result.text);
       toast({ ...fieldToasts.numeroLido });
     } catch (err) {
       console.error('Ler adesivo:', err);
@@ -297,7 +289,7 @@ export default function NewInspection() {
     } finally {
       setStickerLoading(false);
     }
-  }, [debugMode]);
+  }, []);
 
   // ════════════════════════════════════════════════════════════════════════
   // ROTEAMENTO DE CÂMERA E CAPTURA
@@ -790,16 +782,57 @@ export default function NewInspection() {
                   <p className="text-sm font-medium text-center text-primary mt-2">Lendo adesivo…</p>
                 )}
 
-                {/* DEBUG: ADESIVO */}
+                {/* DEBUG: ADESIVO — espelha a UI de debug da Etapa 1 (Placas) */}
+                {debugMode && stickerOcrConfidence !== null && !stickerLoading && (
+                  <div className={`flex items-center gap-2 rounded-lg p-3 ${
+                    stickerOcrConfidence >= 80 ? 'bg-accent/10 border border-accent/30' : 'bg-destructive/10 border border-destructive/30'
+                  }`}>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xs font-bold">Confiança do OCR</span>
+                        <span className={`text-xs font-black ${stickerOcrConfidence >= 80 ? 'text-accent' : 'text-destructive'}`}>
+                          {stickerOcrConfidence.toFixed(0)}%
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-muted">
+                        <div
+                          className={`h-full rounded-full transition-all ${stickerOcrConfidence >= 80 ? 'bg-accent' : 'bg-destructive'}`}
+                          style={{ width: `${Math.min(stickerOcrConfidence, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                    {stickerOcrConfidence < 80 && <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />}
+                  </div>
+                )}
+
                 {debugMode && stickerOcrDebugUrl && !stickerLoading && (
                   <div className="space-y-2 p-3 border border-border/60 rounded-lg bg-secondary/20">
-                    <p className="text-xs font-bold text-foreground">Visão Binarizada do Adesivo (ALPR)</p>
+                    <p className="text-xs font-bold text-foreground">Visão do YOLO — Dígitos Detectados</p>
                     <img
                       src={stickerOcrDebugUrl}
-                      alt="Imagem processada do adesivo"
-                      className="w-full max-h-[200px] object-contain rounded-md border border-border bg-white"
+                      alt="Foto com bounding boxes dos dígitos"
+                      className="w-full rounded-md border border-border bg-white"
                       style={{ imageRendering: 'pixelated' }}
                     />
+                  </div>
+                )}
+
+                {debugMode && (stickerCharDebugImages ?? []).length > 0 && !stickerLoading && (
+                  <div className="space-y-2 p-3 border border-border/60 rounded-lg bg-secondary/20">
+                    <p className="text-xs font-bold text-foreground">Dígitos Segmentados</p>
+                    <div className="flex gap-1.5 overflow-x-auto pb-1">
+                      {(stickerCharDebugImages ?? []).map((img, i) => (
+                        <div key={i} className="flex flex-col items-center gap-1 shrink-0">
+                          <img
+                            src={img}
+                            alt={`Dígito ${i + 1}`}
+                            className="w-10 h-auto rounded border border-border bg-white shadow-sm"
+                            style={{ imageRendering: 'pixelated' }}
+                          />
+                          <span className="text-[10px] font-mono font-bold text-muted-foreground">{i + 1}</span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
 
