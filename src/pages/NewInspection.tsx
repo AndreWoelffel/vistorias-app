@@ -561,7 +561,10 @@ export default function NewInspection() {
       return (
         <RealtimeScannerCamera
           mode="plate"
-          onCapture={(blob) => { setCameraMode(null); runOCR(blob, 'placa'); }}
+          onCapture={({ originalImageBlob }) => {
+            setCameraMode(null);
+            runOCR(originalImageBlob, 'placa');
+          }}
           onCancel={() => setCameraMode(null)}
         />
       );
@@ -572,7 +575,7 @@ export default function NewInspection() {
       return (
         <RealtimeScannerCamera
           mode="sticker"
-          onCapture={(blob) => handleStickerCapture(blob)}
+          onCapture={({ originalImageBlob }) => handleStickerCapture(originalImageBlob)}
           onCancel={() => setCameraMode(null)}
         />
       );
