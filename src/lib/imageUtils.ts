@@ -159,7 +159,7 @@ export async function preloadAlprModels(): Promise<void> {
   }
 }
 
-interface YOLOBox {
+export interface YOLOBox {
   x: number;
   y: number;
   w: number;
@@ -737,6 +737,86 @@ export async function runStickerPipelineYOLO(
   const debugImage = debugOut.toDataURL('image/png');
 
   return { text, confidence: avgConf, debugImage, charDebugImages };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Scanner em Tempo Real — detecção leve sem OCR (usado pelo useRealtimeScanner)
+// Recebe um frame do vídeo já desenhado em canvas, devolve YOLOBox[] de chars.
+// Toda alocação de tensor é encapsulada em tf.tidy() + dispose explícito.
+// ═══════════════════════════════════════════════════════════════════════════════
+export async function scanFrameForSticker(
+  frameCanvas: HTMLCanvasElement
+): Promise<YOLOBox[]> {
+  const yolo = await loadYOLOVistoriasModel();
+  if (!yolo) return [];
+
+  const origW = frameCanvas.width;
+  const origH = frameCanvas.height;
+  if (origW === 0 || origH === 0) return [];
+
+  const yoloCanvas = document.createElement('canvas');
+  yoloCanvas.width = YOLO_INPUT_SIZE;
+  yoloCanvas.height = YOLO_INPUT_SIZE;
+  const yoloCtx = yoloCanvas.getContext('2d')!;
+  yoloCtx.fillStyle = '#727272';
+  yoloCtx.fillRect(0, 0, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
+  const gain = Math.min(YOLO_INPUT_SIZE / origW, YOLO_INPUT_SIZE / origH);
+  const padX = (YOLO_INPUT_SIZE - origW * gain) / 2;
+  const padY = (YOLO_INPUT_SIZE - origH * gain) / 2;
+  yoloCtx.drawImage(frameCanvas, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
+
+  const output = tf.tidy(() => {
+    const t = (tf.browser.fromPixels(yoloCanvas, 3) as tf.Tensor3D)
+      .expandDims(0).toFloat().div(255.0) as tf.Tensor4D;
+    return (yolo as tf.GraphModel).predict(t) as tf.Tensor;
+  }) as tf.Tensor;
+
+  const rawOut = Array.isArray(output) ? output[0] : output;
+  const charBoxes = await decodeYOLOOutput(rawOut, gain, padX, padY);
+
+  if (Array.isArray(output)) output.forEach((t: tf.Tensor) => t.dispose());
+  else output.dispose();
+
+  return charBoxes;
+}
+
+// Versão da função de scan para o modelo de PLACAS (model_yolo_placas).
+// Idêntica a scanFrameForSticker, mas usa loadYOLOModel() em vez de
+// loadYOLOVistoriasModel() — mantém os dois modelos completamente separados.
+export async function scanFrameForPlate(
+  frameCanvas: HTMLCanvasElement
+): Promise<YOLOBox[]> {
+  const yolo = await loadYOLOModel();
+  if (!yolo) return [];
+
+  const origW = frameCanvas.width;
+  const origH = frameCanvas.height;
+  if (origW === 0 || origH === 0) return [];
+
+  const yoloCanvas = document.createElement('canvas');
+  yoloCanvas.width = YOLO_INPUT_SIZE;
+  yoloCanvas.height = YOLO_INPUT_SIZE;
+  const yoloCtx = yoloCanvas.getContext('2d')!;
+  yoloCtx.fillStyle = '#000000';
+  yoloCtx.fillRect(0, 0, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE);
+  const gain = Math.min(YOLO_INPUT_SIZE / origW, YOLO_INPUT_SIZE / origH);
+  const padX = (YOLO_INPUT_SIZE - origW * gain) / 2;
+  const padY = (YOLO_INPUT_SIZE - origH * gain) / 2;
+  yoloCtx.drawImage(frameCanvas, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
+
+  const output = tf.tidy(() => {
+    const t = (tf.browser.fromPixels(yoloCanvas, 3) as tf.Tensor3D)
+      .expandDims(0).toFloat().div(255.0) as tf.Tensor4D;
+    return (yolo as tf.GraphModel).predict(t) as tf.Tensor;
+  }) as tf.Tensor;
+
+  const rawOut = Array.isArray(output) ? output[0] : output;
+  const charBoxes = await decodeYOLOOutput(rawOut, gain, padX, padY);
+
+  if (Array.isArray(output)) output.forEach((t: tf.Tensor) => t.dispose());
+  else output.dispose();
+
+  return charBoxes;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
+import { RealtimeScannerCamera } from '@/components/RealtimeScannerCamera';
 import { addVistoria } from '@/hooks/useVistorias';
 import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync } from '@/lib/db';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
@@ -555,31 +556,40 @@ export default function NewInspection() {
 
   // TELA 3: Câmera Dinâmica
   if (cameraMode) {
-    let title = "Capturar Foto";
-    let overlay: 'plate' | 'number' | 'none' = 'none';
-    let isMulti = false;
+    // Placa → scanner YOLO em tempo real (auto-trigger, model_yolo_placas)
+    if (cameraMode === 'placa') {
+      return (
+        <RealtimeScannerCamera
+          mode="plate"
+          onCapture={(blob) => { setCameraMode(null); runOCR(blob, 'placa'); }}
+          onCancel={() => setCameraMode(null)}
+        />
+      );
+    }
 
-    if (cameraMode === 'placa') { 
-      title = "Foto da Placa"; 
-      overlay = 'plate'; 
-      isMulti = true; 
+    // Adesivo → scanner YOLO em tempo real (auto-trigger, model_yolo_vistorias)
+    if (cameraMode === 'numero') {
+      return (
+        <RealtimeScannerCamera
+          mode="sticker"
+          onCapture={(blob) => handleStickerCapture(blob)}
+          onCancel={() => setCameraMode(null)}
+        />
+      );
     }
-    if (cameraMode === 'numero') { 
-      title = "Foto do Adesivo"; 
-      overlay = 'number'; 
-    }
+
+    // Fotos gerais (chassi, motor, geral) → câmera manual existente
+    let title = "Capturar Foto";
     if (cameraMode === 'chassi') title = "Foto do Chassi";
-    if (cameraMode === 'motor') title = "Foto do Motor";
-    if (cameraMode === 'geral') title = "Foto Geral";
+    if (cameraMode === 'motor')  title = "Foto do Motor";
+    if (cameraMode === 'geral')  title = "Foto Geral";
 
     return (
-      <CameraCapture 
-        title={title} 
-        overlayType={overlay} 
-        onCapture={handleCapture} 
-        onMultiCapture={isMulti ? handleMultiCapture : undefined}
-        onCancel={() => setCameraMode(null)} 
-        multiFrame={isMulti}
+      <CameraCapture
+        title={title}
+        overlayType="none"
+        onCapture={handleCapture}
+        onCancel={() => setCameraMode(null)}
       />
     );
   }
