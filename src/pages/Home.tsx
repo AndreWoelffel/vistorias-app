@@ -4,6 +4,7 @@ import { ClipboardCheck, ChevronDown, LogOut, Gavel, Users } from 'lucide-react'
 import { Button } from '@/components/ui/button';
 import { useLeiloes } from '@/hooks/useVistorias';
 import { useAuth } from '@/hooks/useAuth';
+import { leilaoEntryPath } from '@/config/appMode';
 
 export default function Home() {
   const { leiloes, loading: loadingLeiloes } = useLeiloes();
@@ -31,7 +32,8 @@ export default function Home() {
     if (!exists) {
       return;
     }
-    navigate(`/dashboard/${selectedId}`);
+    navigate(leilaoEntryPath(selectedId));
+    // MODO COMPLETO: navigate(`/dashboard/${selectedId}`);
   };
 
   return (
@@ -92,7 +94,7 @@ export default function Home() {
             disabled={!selectedId || !safeLeiloes.some((l) => l.id === selectedId)}
             className="w-full h-14 min-h-14 text-lg font-bold rounded-xl disabled:opacity-40 shadow-lg"
           >
-            Abrir painel
+            Nova vistoria
           </Button>
         </form>
 

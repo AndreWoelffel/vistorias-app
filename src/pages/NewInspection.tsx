@@ -37,6 +37,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
 import { toast } from '@/hooks/use-toast';
 import { fieldToasts } from '@/lib/uxCopy';
+import { afterInspectionPath } from '@/config/appMode';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -438,7 +439,8 @@ export default function NewInspection() {
         toast({ title: 'Salva no aparelho', description: 'Enviamos automaticamente quando a internet voltar.' });
       }
       
-      navigate(`/dashboard/${id}`, { replace: true });
+      navigate(afterInspectionPath(id), { replace: true });
+      // MODO COMPLETO: navigate(`/dashboard/${id}`, { replace: true });
     } catch (err) {
       console.error(err);
       toast({ title: 'Não salvou', description: 'Tente de novo. Se continuar, feche e abra o app.', variant: 'destructive' });
@@ -463,7 +465,8 @@ export default function NewInspection() {
   };
 
   const handleCancel = () => setShowCancelDialog(true);
-  const confirmCancel = () => navigate(`/dashboard/${id}`, { replace: true });
+  const confirmCancel = () => navigate(afterInspectionPath(id), { replace: true });
+  // MODO COMPLETO: const confirmCancel = () => navigate(`/dashboard/${id}`, { replace: true });
 
   // ════════════════════════════════════════════════════════════════════════
   // RENDERIZAÇÃO
