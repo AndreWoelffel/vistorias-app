@@ -33,18 +33,11 @@ export function generateUuid(): string {
     try {
       const id = crypto.randomUUID();
       if (isValidUuid(id)) {
-        if (import.meta.env.DEV) {
-          console.debug('[uuid] usando crypto.randomUUID');
-        }
         return id;
       }
     } catch {
       /* continua para fallback */
     }
-  }
-
-  if (import.meta.env.DEV) {
-    console.debug('[uuid] usando fallback');
   }
 
   const id = uuidV4Fallback();

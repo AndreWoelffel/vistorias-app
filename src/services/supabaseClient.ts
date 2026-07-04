@@ -23,9 +23,4 @@ if (!supabaseUrl?.trim() || !supabaseAnonKey?.trim()) {
 
 assertNoSecretKeyInBrowser(supabaseAnonKey);
 
-/** Validação temporária: confira no console se o prefixo é sb_publishable_ — remover depois. */
-if (import.meta.env.DEV) {
-  console.log("SUPABASE KEY:", supabaseAnonKey.slice(0, 20));
-}
-
 export const supabase = createClient(supabaseUrl.trim(), supabaseAnonKey.trim());

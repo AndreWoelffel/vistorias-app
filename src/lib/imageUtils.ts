@@ -31,17 +31,12 @@ function ensureTF(): Promise<void> {
       try {
         await tf.setBackend('webgl');
         await tf.ready();
-        console.log('[ALPR] Motor da IA ativado com sucesso: WebGL (GPU)');
       } catch (e1) {
-        console.warn('[ALPR] WebGL indisponível no dispositivo, tentando WASM...', e1);
         try {
-          // Usa o CDN global para os binários do WASM (não pesa o seu build final)
           setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm/dist/');
           await tf.setBackend('wasm');
           await tf.ready();
-          console.log('[ALPR] Motor da IA ativado com sucesso: WASM (Alta Performance CPU)');
         } catch (e2) {
-          console.warn('[ALPR] WASM falhou. Entrando em modo segurança: CPU puro (Mais Lento)...', e2);
           await tf.setBackend('cpu');
           await tf.ready();
         }
@@ -127,8 +122,6 @@ export async function preloadAlprModels(): Promise<void> {
       loadCNNModel()
     ]);
 
-    console.log('[ALPR] Iniciando Aquecimento (Warm-up) para evitar congelamento de tela...');
-
     if (yolo) {
       tf.tidy(() => {
         const dummy = tf.zeros([1, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE, 3]) as tf.Tensor;
@@ -153,9 +146,8 @@ export async function preloadAlprModels(): Promise<void> {
       });
     }
 
-    console.log('[ALPR] Motores aquecidos e prontos para inferência instantânea.');
-  } catch (err) {
-    console.warn('[ALPR] Falha no aquecimento', err);
+  } catch {
+    /* warm-up opcional — falha silenciosa */
   }
 }
 
@@ -1247,9 +1239,6 @@ async function preprocessAdvanced(
             tmpCtx.drawImage(canvas, -w / 2, -h / 2);
             tmpCtx.restore();
             freshCtx.drawImage(tmp, 0, 0);
-            if (import.meta.env.DEV) {
-              console.log(`[Deskew] Corrigido ${skewDeg.toFixed(1)}°`);
-            }
           }
         }
 

@@ -4,6 +4,7 @@
 import {
   getVistoriasByLeilao,
   normalizeVistoriaStatusSync,
+  removeVistoriaQueueItems,
   updateVistoria,
   type Vistoria,
   type VistoriaDuplicateConflictPeer,
@@ -110,6 +111,7 @@ export async function recalculateDuplicateVistoriasForLeilao(leilaoId: number): 
           duplicateConflictWith: undefined,
           duplicateConflictWithList: undefined,
         });
+        await removeVistoriaQueueItems(v.id);
       }
       continue;
     }

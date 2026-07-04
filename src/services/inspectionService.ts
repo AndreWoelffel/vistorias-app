@@ -79,13 +79,13 @@ async function ensureLeilaoSupabaseId(localLeilaoId: number): Promise<number | n
 
 export async function fetchAndMergeVistoriasFromCloudForLeilao(
   localLeilaoId: number,
-): Promise<{ ok: boolean; rowCount: number }> {
+): Promise<{ ok: boolean; rowCount: number; removedLocal: number }> {
   const leilao = await getLeilaoById(localLeilaoId);
-  if (!leilao) return { ok: false, rowCount: 0 };
+  if (!leilao) return { ok: false, rowCount: 0, removedLocal: 0 };
   
   const fk = leilao.supabaseId;
   // MÁGICA DO ARQUITETO 3: Impede a busca fantasma se for NaN
-  if (fk == null || Number.isNaN(fk)) return { ok: false, rowCount: 0 };
+  if (fk == null || Number.isNaN(fk)) return { ok: false, rowCount: 0, removedLocal: 0 };
 
   const { data, error } = await supabase
     .from('vistorias_com_leilao')
@@ -93,11 +93,11 @@ export async function fetchAndMergeVistoriasFromCloudForLeilao(
     .eq('leilao_id', fk)
     .order('created_at', { ascending: false });
 
-  if (error) return { ok: false, rowCount: 0 };
+  if (error) return { ok: false, rowCount: 0, removedLocal: 0 };
 
   const rows = (data ?? []) as Record<string, unknown>[];
-  await mergeVistoriasFromCloudRows(localLeilaoId, rows);
-  return { ok: true, rowCount: rows.length };
+  const { removedLocal } = await mergeVistoriasFromCloudRows(localLeilaoId, rows);
+  return { ok: true, rowCount: rows.length, removedLocal };
 }
 
 const STORAGE_BUCKET = 'fotos-vistorias';
@@ -229,22 +229,6 @@ export async function analyzeLocalDuplicateVistoria(
   return { duplicate: true, type, info: buildDuplicateInfo(type, p, n), conflictWith: peer ? vistoriaToConflictPeer(peer) : undefined };
 }
 
-export async function findLocalDuplicateVistoria(
-  leilaoId: number,
-  placa: string,
-  numeroVistoria: string,
-  excludeLocalId?: number,
-): Promise<Vistoria | undefined> {
-  const list = await getVistoriasByLeilao(leilaoId, { includePendingCloudDelete: true });
-  const p = normPlaca(placa);
-  const n = normNumVistoria(numeroVistoria);
-  for (const v of list) {
-    if (excludeLocalId != null && v.id === excludeLocalId) continue;
-    if (normPlaca(v.placa) === p || normNumVistoria(v.numeroVistoria) === n) return v;
-  }
-  return undefined;
-}
-
 function cloudRowIsSelf(
   row: { id?: string; external_id?: string | null } | null | undefined,
   extEx: string,
@@ -343,10 +327,6 @@ export interface InspectionData {
   cloudVistoriaId?: string;
   localVistoriaId?: number;
   localUpdatedAtMs?: number;
-}
-
-function devLogVistoriaSync(tag: string, payload: Record<string, unknown>) {
-  if (import.meta.env.DEV) console.debug(`[vistoria-sync] ${tag}`, payload);
 }
 
 export async function saveInspection(data: InspectionData): Promise<boolean> {

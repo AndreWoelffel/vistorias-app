@@ -22,8 +22,9 @@ import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { RealtimeScannerCamera } from '@/components/RealtimeScannerCamera';
 import { addVistoria } from '@/hooks/useVistorias';
-import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync } from '@/lib/db';
+import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync, updateVistoria } from '@/lib/db';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
+import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
 import { generateUuid } from '@/lib/uuid';
 import {
   ocrWithVoting,
@@ -404,16 +405,27 @@ export default function NewInspection() {
         placaSugeridaIA: isHardExample && placaOriginalIA ? placaOriginalIA : undefined,
       });
 
-      await recalculateDuplicateVistoriasForLeilao(id);
+      const localDup = await analyzeLocalDuplicateVistoria(
+        id,
+        finalPlacaUpper,
+        numero,
+        localId,
+      );
 
-      const vAfter = await getVistoriaById(localId);
-      const stAfter = normalizeVistoriaStatusSync(vAfter?.statusSync);
-      const isDup = stAfter === 'aguardando_ajuste' || stAfter === 'conflito_duplicidade';
-
-      if (!isDup) {
+      if (localDup.duplicate) {
+        await updateVistoria(localId, {
+          statusSync: 'aguardando_ajuste',
+          syncMessage: duplicateUserMessage(localDup.type),
+          duplicateType: localDup.type,
+          duplicateInfo: localDup.info,
+          duplicateConflictWith: localDup.conflictWith,
+        });
+        await recalculateDuplicateVistoriasForLeilao(id);
+      } else {
         await addToQueue({ type: 'create', entity: 'vistoria', payload: { localVistoriaId: localId } });
         const { processQueue } = await import('@/services/syncService');
         await processQueue();
+        await recalculateDuplicateVistoriasForLeilao(id);
       }
 
       const v = await getVistoriaById(localId);
@@ -440,7 +452,6 @@ export default function NewInspection() {
       }
       
       navigate(afterInspectionPath(id), { replace: true });
-      // MODO COMPLETO: navigate(`/dashboard/${id}`, { replace: true });
     } catch (err) {
       console.error(err);
       toast({ title: 'Não salvou', description: 'Tente de novo. Se continuar, feche e abra o app.', variant: 'destructive' });
@@ -466,7 +477,6 @@ export default function NewInspection() {
 
   const handleCancel = () => setShowCancelDialog(true);
   const confirmCancel = () => navigate(afterInspectionPath(id), { replace: true });
-  // MODO COMPLETO: const confirmCancel = () => navigate(`/dashboard/${id}`, { replace: true });
 
   // ════════════════════════════════════════════════════════════════════════
   // RENDERIZAÇÃO
@@ -475,7 +485,7 @@ export default function NewInspection() {
   if (!leilaoReady) {
     return (
       <div className="flex min-h-screen flex-col bg-background">
-        <AppHeader title="Nova Vistoria" showBack onBack={() => navigate('/')} />
+        <AppHeader title="Nova Vistoria" showBack onBack={() => navigate(id ? afterInspectionPath(id) : '/')} />
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
           <p className="text-sm text-muted-foreground text-center">Carregando…</p>

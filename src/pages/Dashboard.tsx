@@ -26,7 +26,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { AppHeader } from "@/components/AppHeader";
 import { LeilaoDashboardBottomBar } from "@/components/LeilaoDashboardBottomBar";
+import { HubSyncQueue } from "@/components/HubSyncQueue";
 import { useRequireValidLeilao } from "@/hooks/useLeilaoRoute";
+import { SHOW_DASHBOARD_METRICS } from "@/config/appMode";
 import {
   type DashboardPeriod,
   dashboardCountsForLeilao,
@@ -72,7 +74,44 @@ function dayKeysBetween(fromMs: number, toMs: number): string[] {
 }
 
 export default function Dashboard() {
-  const { leilaoId: id, ready } = useRequireValidLeilao();
+  const { leilaoId: id, leilao, ready } = useRequireValidLeilao();
+  const navigate = useNavigate();
+
+  if (!ready) {
+    return (
+      <div className="flex min-h-screen flex-col bg-background">
+        <AppHeader title="Leilão" showBack onBack={() => navigate("/")} />
+        <div className="flex flex-1 flex-col items-center justify-center gap-2">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground font-medium">Carregando…</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Hub simples (modo atual): sem métricas/gráficos ─────────────────────
+  if (!SHOW_DASHBOARD_METRICS) {
+    return (
+      <div className="flex min-h-screen flex-col bg-background">
+        <AppHeader
+          title={leilao?.nome ?? "Leilão"}
+          showBack
+          onBack={() => navigate("/")}
+        />
+        <main className="flex flex-1 flex-col min-h-0 pb-28 pt-2">
+          <HubSyncQueue leilaoId={id} />
+        </main>
+        <LeilaoDashboardBottomBar leilaoId={id} />
+      </div>
+    );
+  }
+
+  // ─── MODO COMPLETO: métricas, gráficos e pendências (SHOW_DASHBOARD_METRICS = true)
+  return <DashboardWithMetrics leilaoId={id} />;
+}
+
+/** Painel completo com estatísticas — ativo apenas quando SHOW_DASHBOARD_METRICS = true */
+function DashboardWithMetrics({ leilaoId: id }: { leilaoId: number }) {
   const navigate = useNavigate();
   const [counts, setCounts] = useState<Awaited<ReturnType<typeof dashboardCountsForLeilao>> | null>(null);
   const [attention, setAttention] = useState<AttentionListItem[]>([]);
@@ -85,7 +124,7 @@ export default function Dashboard() {
   const [syncingAttention, setSyncingAttention] = useState(false);
 
   const load = useCallback(async () => {
-    if (!ready || id == null) return;
+    if (id == null) return;
     setLoading(true);
     try {
       const fromMs = periodToStartMs(period);
@@ -159,7 +198,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [ready, id, period, chartView]);
+  }, [id, period, chartView]);
 
   useEffect(() => {
     void load();
@@ -191,18 +230,6 @@ export default function Dashboard() {
       setSyncingAttention(false);
     }
   };
-
-  if (!ready) {
-    return (
-      <div className="flex min-h-screen flex-col bg-background">
-        <AppHeader title="Painel" showBack onBack={() => navigate("/")} />
-        <div className="flex flex-1 flex-col items-center justify-center gap-2">
-          <Loader2 className="h-8 w-8 animate-spin text-primary" />
-          <p className="text-sm text-muted-foreground font-medium">Carregando métricas…</p>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="flex min-h-screen flex-col bg-background">

@@ -17,17 +17,6 @@ if (import.meta.env.PROD) {
   });
 }
 
-if (import.meta.env.DEV) {
-  window.addEventListener("error", (ev) => {
-    // eslint-disable-next-line no-console
-    console.error("[DEBUG window error]", ev.message, ev.error?.stack ?? ev.filename, ev.lineno, ev.colno);
-  });
-  window.addEventListener("unhandledrejection", (ev) => {
-    // eslint-disable-next-line no-console
-    console.error("[DEBUG unhandledrejection]", ev.reason, ev.reason?.stack);
-  });
-}
-
 createRoot(document.getElementById("root")!).render(
   <DebugErrorBoundary>
     <App />

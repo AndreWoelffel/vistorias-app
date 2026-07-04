@@ -3,6 +3,7 @@ import {
   getQueue,
   getVistoriaById,
   getVistoriasByLeilao,
+  isVistoriaSyncBlockedByDuplicate,
   normalizeVistoriaStatusSync,
   type SyncQueueItem,
   type Vistoria,
@@ -179,6 +180,97 @@ export async function countFailedQueueForLeilao(leilaoId: number): Promise<numbe
     if (ok) n += 1;
   }
   return n;
+}
+
+/** Item exibido no hub — vistorias recentes com estado de fila (mais recente no topo). */
+export type LeilaoSyncQueueEntry = {
+  vistoriaId: number;
+  placa: string;
+  numeroVistoria: string;
+  vistoriador: string;
+  statusSync: Vistoria["statusSync"];
+  fotoUploadFailed?: boolean;
+  duplicateType?: Vistoria["duplicateType"];
+  inQueue: boolean;
+  queueFailed: boolean;
+  sortTs: number;
+};
+
+/**
+ * Lista vistorias do leilão ordenadas por envio mais recente (topo = última na fila).
+ * Usa `createdAt` da fila quando a vistoria ainda está enfileirada; senão `updatedAt`/`createdAt`.
+ */
+async function buildLeilaoSyncEntries(leilaoId: number): Promise<LeilaoSyncQueueEntry[]> {
+  const [vistorias, queue] = await Promise.all([
+    getVistoriasByLeilao(leilaoId),
+    getQueue(),
+  ]);
+
+  const queueByVistoriaId = new Map<number, SyncQueueItem>();
+  for (const item of queue) {
+    if (item.entity !== "vistoria") continue;
+    const vid = (item.payload as { localVistoriaId?: number }).localVistoriaId;
+    if (vid == null) continue;
+    const existing = queueByVistoriaId.get(vid);
+    if (!existing || item.createdAt > existing.createdAt) {
+      queueByVistoriaId.set(vid, item);
+    }
+  }
+
+  const entries: LeilaoSyncQueueEntry[] = [];
+  for (const v of vistorias) {
+    if (v.id == null) continue;
+    const qItem = queueByVistoriaId.get(v.id);
+    const queueFailed = qItem != null && isQueueItemPermanentFailure(qItem);
+    const inQueue =
+      qItem != null &&
+      !queueFailed &&
+      !qItem.retryPaused &&
+      (qItem.nextAttemptAfter == null || qItem.nextAttemptAfter <= Date.now());
+
+    const vUpdated = v.updatedAt ? new Date(v.updatedAt).getTime() : 0;
+    const vCreated = v.createdAt ? new Date(v.createdAt).getTime() : 0;
+    const sortTs = qItem?.createdAt ?? Math.max(vUpdated, vCreated);
+
+    entries.push({
+      vistoriaId: v.id,
+      placa: v.placa,
+      numeroVistoria: v.numeroVistoria,
+      vistoriador: v.vistoriador ?? "",
+      statusSync: v.statusSync,
+      fotoUploadFailed: v.fotoUploadFailed,
+      duplicateType: v.duplicateType,
+      inQueue,
+      queueFailed,
+      sortTs,
+    });
+  }
+
+  return entries.sort((a, b) => b.sortTs - a.sortTs);
+}
+
+export async function listLeilaoSyncQueueEntries(
+  leilaoId: number,
+  limit = 20,
+): Promise<LeilaoSyncQueueEntry[]> {
+  return (await buildLeilaoSyncEntries(leilaoId)).slice(0, limit);
+}
+
+/** Snapshot do hub: última vistoria + duplicidades (exceto a última, para não repetir). */
+export type LeilaoHubSnapshot = {
+  latest: LeilaoSyncQueueEntry | null;
+  duplicates: LeilaoSyncQueueEntry[];
+};
+
+export async function getLeilaoHubSnapshot(leilaoId: number): Promise<LeilaoHubSnapshot> {
+  const sorted = await buildLeilaoSyncEntries(leilaoId);
+  const latest = sorted[0] ?? null;
+  const duplicates = sorted.filter(
+    (e) =>
+      isVistoriaSyncBlockedByDuplicate(e.statusSync) &&
+      e.vistoriaId !== latest?.vistoriaId,
+  );
+  return { latest, duplicates };
 }
 
 export async function dashboardCountsForLeilao(leilaoId: number) {

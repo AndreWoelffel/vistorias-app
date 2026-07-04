@@ -81,13 +81,6 @@ export const reducer = (state: State, action: Action): State => {
   const safeState = normalizeState(state);
   const prevToasts = Array.isArray(safeState.toasts) ? safeState.toasts : [];
 
-  if (import.meta.env.DEV) {
-    // eslint-disable-next-line no-console
-    console.log("[DEBUG reducer state]", safeState);
-    // eslint-disable-next-line no-console
-    console.log("[DEBUG reducer action]", action);
-  }
-
   switch (action.type) {
     case "ADD_TOAST":
       return normalizeState({
@@ -156,9 +149,7 @@ let memoryState: State = { toasts: [] };
 function dispatch(action: Action) {
   try {
     memoryState = normalizeState(reducer(normalizeState(memoryState), action));
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.error("[DEBUG toast dispatch] erro no reducer — resetando toasts", e);
+  } catch {
     memoryState = { toasts: [] };
   }
   listeners.forEach((listener) => {

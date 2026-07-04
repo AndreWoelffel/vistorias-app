@@ -238,6 +238,17 @@ export default function EditInspection() {
 
       await removeVistoriaQueueItems(vistoriaId);
 
+      const peerIds = new Set<number>();
+      if (vistoria.duplicateConflictWith?.localVistoriaId != null) {
+        peerIds.add(vistoria.duplicateConflictWith.localVistoriaId);
+      }
+      for (const p of vistoria.duplicateConflictWithList ?? []) {
+        if (p.localVistoriaId != null) peerIds.add(p.localVistoriaId);
+      }
+      for (const pid of peerIds) {
+        if (pid !== vistoriaId) await removeVistoriaQueueItems(pid);
+      }
+
       const fresh = await getVistoriaById(vistoriaId);
       const fn2 = normalizeVistoriaStatusSync(fresh?.statusSync);
       
@@ -250,6 +261,7 @@ export default function EditInspection() {
         });
         const { processQueue } = await import('@/services/syncService');
         await processQueue();
+        await recalculateDuplicateVistoriasForLeilao(vistoria.leilaoId);
       }
 
       const after = await getVistoriaById(vistoriaId);
@@ -301,10 +313,12 @@ export default function EditInspection() {
 
       await removeVistoriaQueueItems(vistoriaId);
       await updateVistoria(vistoriaId, { pendingCloudDelete: true });
+      await recalculateDuplicateVistoriasForLeilao(v.leilaoId);
       await addToQueue({ type: 'delete', entity: 'vistoria', payload: { localVistoriaId: vistoriaId } });
       
       const { processQueue } = await import('@/services/syncService');
       await processQueue();
+      await recalculateDuplicateVistoriasForLeilao(v.leilaoId);
       
       const stillThere = await getVistoriaById(vistoriaId);
       if (stillThere) {

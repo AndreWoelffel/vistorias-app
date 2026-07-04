@@ -21,10 +21,8 @@ export function useSupabaseUsuarios() {
     try {
       const rows = await listAllUsuariosAdmin();
       const safe = Array.isArray(rows) ? rows : [];
-      if (import.meta.env.DEV) console.log('DEBUG lista usuarios:', safe);
       setUsuarios(safe);
     } catch {
-      if (import.meta.env.DEV) console.log('DEBUG lista usuarios:', []);
       setUsuarios([]);
     } finally {
       setLoading(false);

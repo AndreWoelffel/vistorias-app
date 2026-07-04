@@ -543,13 +543,6 @@ export async function ensureVistoriaLocalUuidIsUuid(vistoria: Vistoria): Promise
   }
 
   const fresh = generateUuid();
-  if (import.meta.env.DEV) {
-    console.debug('[vistoria-sync] corrigindo localUuid inválido', {
-      idLocal: id,
-      valorAntigo: cur ?? '(ausente)',
-      valorNovo: fresh,
-    });
-  }
   await updateVistoria(id, { localUuid: fresh });
   return { ...vistoria, localUuid: fresh };
 }

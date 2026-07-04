@@ -117,17 +117,6 @@ async function sleepLinearRetryDelay(retries: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-export async function getPendingSyncCount(): Promise<number> {
-  const now = Date.now();
-  const items = await getQueue();
-  return items.filter((i) => isActionableItem(i, now)).length;
-}
-
-export async function getFailedSyncCount(): Promise<number> {
-  const items = await getQueue();
-  return items.filter((i) => isQueueItemPermanentFailure(i)).length;
-}
-
 export async function getSyncQueueCounts(): Promise<{ pending: number; failed: number }> {
   const now = Date.now();
   const items = await getQueue();
@@ -342,13 +331,22 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
     if (!v.pendingCloudDelete) return 'done';
     
     const cloudId = v.cloudVistoriaId?.trim();
+    const leilaoId = v.leilaoId;
     if (!cloudId) {
       await deleteVistoria(vid);
+      if (leilaoId != null && Number.isFinite(leilaoId)) {
+        const { recalculateDuplicateVistoriasForLeilao } = await import('@/services/duplicateVistoriaRecalc');
+        await recalculateDuplicateVistoriasForLeilao(leilaoId);
+      }
       return 'done';
     }
     const { error } = await supabase.from('vistorias').delete().eq('id', cloudId);
     if (error) return 'fail';
     await deleteVistoria(vid);
+    if (leilaoId != null && Number.isFinite(leilaoId)) {
+      const { recalculateDuplicateVistoriasForLeilao } = await import('@/services/duplicateVistoriaRecalc');
+      await recalculateDuplicateVistoriasForLeilao(leilaoId);
+    }
     return 'done';
   }
 

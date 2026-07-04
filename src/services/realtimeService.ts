@@ -66,7 +66,6 @@ async function applyLeilaoDelete(oldRow: Record<string, unknown>): Promise<void>
 }
 
 async function handleLeiloesChange(payload: RealtimePostgresChangesPayload<Record<string, unknown>>) {
-  if (import.meta.env.DEV) console.log("Realtime leilao:", payload);
   try {
     if (payload.eventType === 'DELETE') {
       const old = payload.old as Record<string, unknown> | null;
@@ -82,7 +81,6 @@ async function handleLeiloesChange(payload: RealtimePostgresChangesPayload<Recor
 }
 
 async function handleVistoriasChange(payload: RealtimePostgresChangesPayload<Record<string, unknown>>) {
-  if (import.meta.env.DEV) console.log("Realtime vistoria:", payload);
   try {
     if (payload.eventType === 'DELETE') {
       const old = payload.old as Record<string, unknown> | null;
@@ -103,15 +101,9 @@ const channels: RealtimeChannel[] = [];
 let started = false;
 
 function logSubscribeStatus(table: string, status: string, err?: Error) {
-  if (status === "SUBSCRIBED") {
-    if (import.meta.env.DEV) console.log(`[realtime] Inscrito: ${table}`);
-  } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+  if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
     if (import.meta.env.DEV) console.warn(`[realtime] Canal ${table}:`, status, err);
   }
-}
-
-export function isRealtimeStarted(): boolean {
-  return started;
 }
 
 /** Dois canais: `leiloes` e `vistorias` (postgres_changes em public.*). */

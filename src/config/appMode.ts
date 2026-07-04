@@ -1,25 +1,21 @@
 /**
- * MODO SIMPLES vs MODO COMPLETO
+ * Configuração de modos do app
  * ─────────────────────────────
  *
- * SIMPLE_MODE = true  (atual)
- *   Login → Escolher leilão → Nova vistoria
- *   Sem dashboard, gráficos, histórico ou duplicidades.
+ * SHOW_DASHBOARD_METRICS = false (atual)
+ *   Hub do leilão: header + Nova vistoria + Histórico.
+ *   Sem cards, gráficos Recharts nem métricas detalhadas.
  *
- * SIMPLE_MODE = false
- *   Restaura o fluxo completo com painel de métricas.
- *
- * Para voltar ao modo completo:
- *   1. Mude SIMPLE_MODE para false abaixo.
- *   2. Descomente as rotas marcadas "MODO COMPLETO" em App.tsx.
- *   3. Descomente as linhas marcadas "MODO COMPLETO" em Home.tsx e NewInspection.tsx.
+ * SHOW_DASHBOARD_METRICS = true
+ *   Restaura painel completo com estatísticas e gráficos.
+ *   (código preservado em Dashboard.tsx — basta mudar esta flag)
  */
-export const SIMPLE_MODE = true;
 
-/** Rota após escolher leilão na Home (modo simples). */
-export const leilaoEntryPath = (leilaoId: number) =>
-  SIMPLE_MODE ? `/vistoria/${leilaoId}` : `/dashboard/${leilaoId}`;
+/** Exibe cards, gráficos e métricas no painel do leilão. */
+export const SHOW_DASHBOARD_METRICS = false;
 
-/** Rota após salvar/cancelar vistoria. */
-export const afterInspectionPath = (leilaoId: number) =>
-  SIMPLE_MODE ? '/' : `/dashboard/${leilaoId}`;
+/** Rota após escolher leilão na Home → hub do leilão. */
+export const leilaoEntryPath = (leilaoId: number) => `/dashboard/${leilaoId}`;
+
+/** Rota após salvar/cancelar vistoria → volta ao hub do mesmo leilão. */
+export const afterInspectionPath = (leilaoId: number) => `/dashboard/${leilaoId}`;

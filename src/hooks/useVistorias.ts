@@ -2,9 +2,6 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   getAllLeiloes,
   getVistoriasByLeilao,
-  getVistoriaById,
-  countVistoriasToday,
-  countVistorias,
   mergeLeiloesFromCloudRows,
   type Leilao,
   type Vistoria,
@@ -108,7 +105,6 @@ export function useLeiloes() {
         const localAll = await getAllLeiloes();
         const merged = buildMergedLeiloesList(mapped, localAll);
         const out = (Array.isArray(merged) ? merged : []).filter((l) => !l.deleted);
-        if (import.meta.env.DEV) console.log('DEBUG lista leiloes:', out);
         setLeiloes(out);
         return;
       }
@@ -120,7 +116,6 @@ export function useLeiloes() {
       const list = Array.isArray(local) ? [...local] : [];
       list.sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
       const offlineList = list.filter((l) => !l.deleted);
-      if (import.meta.env.DEV) console.log('DEBUG lista leiloes:', offlineList);
       setLeiloes(offlineList);
     } catch (e) {
       if (import.meta.env.DEV) {
@@ -131,10 +126,8 @@ export function useLeiloes() {
         const list = Array.isArray(local) ? [...local] : [];
         list.sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
         const errList = list.filter((l) => !l.deleted);
-        if (import.meta.env.DEV) console.log('DEBUG lista leiloes:', errList);
         setLeiloes(errList);
       } catch {
-        if (import.meta.env.DEV) console.log('DEBUG lista leiloes:', []);
         setLeiloes([]);
       }
     } finally {
@@ -204,7 +197,7 @@ export function useVistorias(leilaoId: number | null) {
   const [vistorias, setVistorias] = useState<Vistoria[]>([]);
   const [loading, setLoading] = useState(false);
 
-  const refresh = useCallback(async (opts?: { silent?: boolean }) => {
+  const refresh = useCallback(async (opts?: { silent?: boolean; syncFromCloud?: boolean }) => {
     if (!leilaoId) {
       setVistorias([]);
       setLoading(false);
@@ -213,7 +206,7 @@ export function useVistorias(leilaoId: number | null) {
     if (!opts?.silent) setLoading(true);
     try {
       const online = typeof navigator === 'undefined' || navigator.onLine;
-      if (online) {
+      if (opts?.syncFromCloud && online) {
         const { fetchAndMergeVistoriasFromCloudForLeilao } = await import(
           '@/services/inspectionService'
         );
@@ -232,7 +225,6 @@ export function useVistorias(leilaoId: number | null) {
 
       const data = await getVistoriasByLeilao(leilaoId);
       const safe = Array.isArray(data) ? data : [];
-      if (import.meta.env.DEV) console.log('DEBUG lista vistorias:', safe);
       setVistorias(safe);
     } catch (e) {
       if (import.meta.env.DEV) {
@@ -247,7 +239,6 @@ export function useVistorias(leilaoId: number | null) {
         const safe = Array.isArray(data) ? data : [];
         setVistorias(safe);
       } catch {
-        if (import.meta.env.DEV) console.log('DEBUG lista vistorias:', []);
         setVistorias([]);
       }
     } finally {
@@ -267,39 +258,4 @@ export function useVistorias(leilaoId: number | null) {
   }, [refresh]);
 
   return { vistorias: vistorias ?? [], loading, refresh };
-}
-
-export function useTodayCount(leilaoId: number | null) {
-  const [count, setCount] = useState(0);
-
-  useEffect(() => {
-    if (!leilaoId) return;
-    countVistoriasToday(leilaoId).then(setCount);
-  }, [leilaoId]);
-
-  return count;
-}
-
-export function useTotalCount(leilaoId: number | null) {
-  const [count, setCount] = useState(0);
-
-  useEffect(() => {
-    if (!leilaoId) return;
-    countVistorias(leilaoId).then(setCount);
-  }, [leilaoId]);
-
-  return count;
-}
-
-export function useVistoriador() {
-  const [vistoriador, setVistoriador] = useState(() =>
-    localStorage.getItem('vistoriador') || ''
-  );
-
-  const save = useCallback((name: string) => {
-    setVistoriador(name);
-    localStorage.setItem('vistoriador', name);
-  }, []);
-
-  return { vistoriador, setVistoriador: save };
 }

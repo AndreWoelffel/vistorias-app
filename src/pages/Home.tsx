@@ -33,7 +33,6 @@ export default function Home() {
       return;
     }
     navigate(leilaoEntryPath(selectedId));
-    // MODO COMPLETO: navigate(`/dashboard/${selectedId}`);
   };
 
   return (
@@ -94,7 +93,7 @@ export default function Home() {
             disabled={!selectedId || !safeLeiloes.some((l) => l.id === selectedId)}
             className="w-full h-14 min-h-14 text-lg font-bold rounded-xl disabled:opacity-40 shadow-lg"
           >
-            Nova vistoria
+            Entrar no leilão
           </Button>
         </form>
 

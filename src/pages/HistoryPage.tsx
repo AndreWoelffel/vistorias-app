@@ -97,16 +97,43 @@ export default function HistoryPage() {
 
   const handlePullFromCloud = async () => {
     if (!online) {
-      toast({ title: "Sem conexão", description: "Conecte-se à internet para baixar dados do Supabase.", variant: "destructive" });
+      toast({
+        title: "Sem conexão",
+        description: "Conecte-se à internet para sincronizar com o servidor.",
+        variant: "destructive",
+      });
       return;
     }
     setPullingFromCloud(true);
     try {
-      await processQueue(); 
-      await refresh();
-      toast({ title: "Sincronização concluída", description: "O histórico local foi atualizado com a nuvem." });
-    } catch (e) {
-      toast({ title: "Erro de Sincronização", description: "Não foi possível baixar os dados do Supabase.", variant: "destructive" });
+      await processQueue();
+      const { fetchAndMergeVistoriasFromCloudForLeilao } = await import(
+        "@/services/inspectionService",
+      );
+      const merged = await fetchAndMergeVistoriasFromCloudForLeilao(id);
+      if (!merged.ok) {
+        toast({
+          title: "Não sincronizou",
+          description: "Não foi possível buscar os dados do servidor.",
+          variant: "destructive",
+        });
+        return;
+      }
+      await refresh({ silent: true });
+      const removedHint =
+        merged.removedLocal > 0
+          ? ` ${merged.removedLocal} registro(s) removido(s) deste aparelho.`
+          : "";
+      toast({
+        title: "Sincronizado com o servidor",
+        description: `${merged.rowCount} vistoria(s) no servidor.${removedHint}`,
+      });
+    } catch {
+      toast({
+        title: "Erro de sincronização",
+        description: "Não foi possível atualizar o histórico.",
+        variant: "destructive",
+      });
     } finally {
       setPullingFromCloud(false);
     }
@@ -143,7 +170,7 @@ export default function HistoryPage() {
   if (!ready) {
     return (
       <div className="flex min-h-screen flex-col bg-background">
-        <AppHeader title="Histórico" showBack onBack={() => navigate('/')} />
+        <AppHeader title="Histórico" showBack onBack={() => navigate(`/dashboard/${id}`)} />
         <div className="flex flex-1 flex-col items-center justify-center gap-2">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
           <p className="text-sm text-muted-foreground font-medium">Carregando…</p>
@@ -154,11 +181,11 @@ export default function HistoryPage() {
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
-      <AppHeader title="Histórico" showBack />
+      <AppHeader title="Histórico" showBack onBack={() => navigate(`/dashboard/${id}`)} />
 
       <div className="space-y-4 px-4 pt-4 pb-2">
         <p className="text-xs font-medium leading-snug text-muted-foreground/80">
-          Vistorias deste leilão salvas neste aparelho. Conecte-se à internet para sincronizar alterações com a nuvem.
+          Lista deste aparelho. Use &quot;Sincronizar&quot; com internet para alinhar com o servidor.
         </p>
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -172,6 +199,7 @@ export default function HistoryPage() {
               enterKeyHint="search"
             />
           </div>
+          {/* MODO COMPLETO: descomente para habilitar tela de duplicidades
           <Button
             type="button"
             variant="outline"
@@ -180,6 +208,7 @@ export default function HistoryPage() {
           >
             Tratar duplicidades
           </Button>
+          */}
         </div>
 
         <div className="flex items-center gap-2 border-b border-border/50 pb-3">
@@ -198,11 +227,27 @@ export default function HistoryPage() {
           </span>
           <Button
             type="button"
+            variant="outline"
+            size="sm"
+            onClick={handlePullFromCloud}
+            disabled={!online || pullingFromCloud}
+            title={online ? "Enviar pendências e baixar do servidor" : "Disponível apenas online"}
+            className="ml-auto h-9 gap-1.5 px-3 text-xs font-bold"
+          >
+            {pullingFromCloud ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <CloudDownload className="h-3.5 w-3.5" />
+            )}
+            Sincronizar
+          </Button>
+          <Button
+            type="button"
             variant="ghost"
             size="sm"
             onClick={exportExcel}
             disabled={exporting || filtered.length === 0}
-            className="ml-auto h-9 gap-1.5 px-3 text-xs font-bold hover:bg-secondary/80"
+            className="h-9 gap-1.5 px-3 text-xs font-bold hover:bg-secondary/80"
           >
             {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
             Exportar Planilha
@@ -228,7 +273,7 @@ export default function HistoryPage() {
               disabled={pullingFromCloud}
             >
               {pullingFromCloud ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CloudDownload className="mr-2 h-4 w-4" />}
-              Baixar do Supabase
+              Sincronizar com o servidor
             </Button>
           </div>
         ) : (

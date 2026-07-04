@@ -16,14 +16,8 @@ export class DebugErrorBoundary extends React.Component<
     return { error };
   }
 
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+  componentDidCatch(_error: Error, errorInfo: React.ErrorInfo) {
     this.setState({ errorInfo });
-    // eslint-disable-next-line no-console
-    console.error("[DEBUG ErrorBoundary] caught:", error?.message, error);
-    // eslint-disable-next-line no-console
-    console.error("[DEBUG ErrorBoundary] stack:", error?.stack);
-    // eslint-disable-next-line no-console
-    console.error("[DEBUG ErrorBoundary] componentStack:", errorInfo?.componentStack);
   }
 
   render() {

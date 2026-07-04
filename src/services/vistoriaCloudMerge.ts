@@ -8,6 +8,7 @@ import {
   findVistoriaIdByCloudId,
   findVistoriaIdByExternalId,
   getVistoriaById,
+  getVistoriasByLeilao,
   normalizeVistoriaStatusSync,
   readStableUuid,
   removeVistoriaQueueItems,
@@ -27,6 +28,53 @@ export function shouldPreserveLocalVistoriaFromCloudMerge(v: Vistoria): boolean 
     n === 'aguardando_ajuste' ||
     n === 'conflito_duplicidade'
   );
+}
+
+function cloudRowUpdatedAtMs(row: Record<string, unknown>): number {
+  return row.updated_at != null ? supabaseTimestampToMs(String(row.updated_at)) : 0;
+}
+
+/** Só preenche ids da nuvem sem sobrescrever placa/número/status locais. */
+async function patchIdentityOnlyFromCloud(
+  localId: number,
+  v: Vistoria,
+  row: Record<string, unknown>,
+): Promise<void> {
+  const externalId = row.external_id != null ? String(row.external_id).trim() : '';
+  const patch: Partial<Omit<Vistoria, 'id'>> = {};
+  if (!v.cloudVistoriaId?.trim() && row.id != null) patch.cloudVistoriaId = String(row.id);
+  if (!readStableUuid(v) && externalId) patch.localUuid = externalId;
+  if (Object.keys(patch).length) await updateVistoria(localId, patch);
+}
+
+async function maybeRecalculateDuplicatesForLeilao(leilaoId: number | undefined): Promise<void> {
+  if (leilaoId == null || !Number.isFinite(leilaoId)) return;
+  const { recalculateDuplicateVistoriasForLeilao } = await import('@/services/duplicateVistoriaRecalc');
+  await recalculateDuplicateVistoriasForLeilao(leilaoId);
+}
+
+/** Realtime/pull: aplica linha da nuvem respeitando edições e correções locais pendentes. */
+async function mergeCloudRowIntoLocalVistoria(
+  localId: number,
+  row: Record<string, unknown>,
+): Promise<void> {
+  const v = await getVistoriaById(localId);
+  if (!v) return;
+
+  if (shouldPreserveLocalVistoriaFromCloudMerge(v)) {
+    await patchIdentityOnlyFromCloud(localId, v, row);
+    return;
+  }
+
+  const cloudMs = cloudRowUpdatedAtMs(row);
+  const localMs = v.updatedAt ?? (v.createdAt ? new Date(v.createdAt).getTime() : 0);
+  if (normalizeVistoriaStatusSync(v.statusSync) === 'sincronizado' && localMs > cloudMs) {
+    await patchIdentityOnlyFromCloud(localId, v, row);
+    return;
+  }
+
+  await patchVistoriaFromCloudRow(localId, row);
+  await maybeRecalculateDuplicatesForLeilao(v.leilaoId);
 }
 
 export async function patchVistoriaFromCloudRow(localId: number, row: Record<string, unknown>): Promise<void> {
@@ -86,7 +134,7 @@ export async function applyVistoriaInsert(row: Record<string, unknown>): Promise
 
   const existingId = await findVistoriaIdByExternalId(externalId);
   if (existingId != null) {
-    await patchVistoriaFromCloudRow(existingId, row);
+    await mergeCloudRowIntoLocalVistoria(existingId, row);
     return;
   }
 
@@ -104,6 +152,7 @@ export async function applyVistoriaInsert(row: Record<string, unknown>): Promise
     updatedAt:
       row.updated_at != null ? supabaseTimestampToMs(String(row.updated_at)) : undefined,
   });
+  await maybeRecalculateDuplicatesForLeilao(localLeilaoId);
 }
 
 export async function applyVistoriaUpdate(row: Record<string, unknown>): Promise<void> {
@@ -117,7 +166,7 @@ export async function applyVistoriaUpdate(row: Record<string, unknown>): Promise
     await applyVistoriaInsert(row);
     return;
   }
-  await patchVistoriaFromCloudRow(localId, row);
+  await mergeCloudRowIntoLocalVistoria(localId, row);
 }
 
 export async function applyVistoriaDelete(oldRow: Record<string, unknown>): Promise<void> {
@@ -168,25 +217,146 @@ export async function mergeCloudRowWithLocalPreservation(
   const v = await getVistoriaById(localId);
   if (!v || v.leilaoId !== localLeilaoId) return;
 
-  if (shouldPreserveLocalVistoriaFromCloudMerge(v)) {
-    const patch: Partial<Omit<Vistoria, 'id'>> = {};
-    if (!v.cloudVistoriaId?.trim() && row.id != null) patch.cloudVistoriaId = String(row.id);
-    if (!readStableUuid(v) && externalId) patch.localUuid = externalId;
-    if (Object.keys(patch).length) await updateVistoria(localId, patch);
-    return;
+  await mergeCloudRowIntoLocalVistoria(localId, row);
+}
+
+function normPlaca(p: string): string {
+  return p.trim().toUpperCase().replace(/\s+/g, '');
+}
+
+function normNumVistoria(n: string): string {
+  return n.trim();
+}
+
+function placaNumKey(placa: string, num: string): string {
+  return `${normPlaca(placa)}|${normNumVistoria(num)}`;
+}
+
+function isDuplicateStatus(v: Vistoria): boolean {
+  const n = normalizeVistoriaStatusSync(v.statusSync);
+  return n === 'aguardando_ajuste' || n === 'conflito_duplicidade';
+}
+
+/** Preserva edições locais reais — duplicidade órfã não conta como proteção. */
+function shouldPreserveLocalFromCloudReconcile(v: Vistoria): boolean {
+  if (v.pendingCloudDelete) return true;
+  if (isDuplicateStatus(v)) return false;
+  const n = normalizeVistoriaStatusSync(v.statusSync);
+  return n === 'rascunho' || n === 'pendente_sync' || n === 'erro_sync';
+}
+
+async function removeLocalVistoriaIfExists(localId: number): Promise<boolean> {
+  const v = await getVistoriaById(localId);
+  if (!v?.id) return false;
+  await deleteVistoria(v.id);
+  await removeVistoriaQueueItems(v.id);
+  return true;
+}
+
+/**
+ * Remove do aparelho vistorias já enviadas que não existem mais na nuvem.
+ * Preserva rascunhos, pendências de envio e edições locais em andamento.
+ */
+export async function reconcileLocalVistoriasWithCloudRows(
+  localLeilaoId: number,
+  rows: Record<string, unknown>[],
+): Promise<number> {
+  const cloudIds = new Set<string>();
+  const externalIds = new Set<string>();
+  const cloudRowsByKey = new Map<string, { cloudId: string; externalId: string }>();
+
+  for (const row of rows) {
+    const cloudId = row.id != null ? String(row.id) : '';
+    const ext = row.external_id != null ? String(row.external_id).trim() : '';
+    if (cloudId) cloudIds.add(cloudId);
+    if (ext) externalIds.add(ext);
+    const key = placaNumKey(String(row.placa ?? ''), String(row.num_vistoria ?? ''));
+    if (cloudId) cloudRowsByKey.set(key, { cloudId, externalId: ext });
   }
 
-  await patchVistoriaFromCloudRow(localId, row);
+  const locals = await getVistoriasByLeilao(localLeilaoId, { includePendingCloudDelete: true });
+  let removed = 0;
+
+  // 1) Fantasmas: tinham cloudVistoriaId mas sumiram do servidor (mesmo com status duplicidade).
+  for (const v of locals) {
+    if (v.id == null) continue;
+    const cloudId = v.cloudVistoriaId?.trim();
+    if (!cloudId || cloudIds.has(cloudId)) continue;
+    if (v.pendingCloudDelete || (await removeLocalVistoriaIfExists(v.id))) {
+      removed += 1;
+    }
+  }
+
+  const localsAfterGhost = await getVistoriasByLeilao(localLeilaoId, { includePendingCloudDelete: true });
+
+  // 2) external_id sincronizado que não existe mais na nuvem.
+  for (const v of localsAfterGhost) {
+    if (v.id == null) continue;
+    if (v.pendingCloudDelete) continue;
+    if (shouldPreserveLocalFromCloudReconcile(v)) continue;
+
+    const cloudId = v.cloudVistoriaId?.trim();
+    if (cloudId) continue;
+
+    const ext = readStableUuid(v);
+    const ns = normalizeVistoriaStatusSync(v.statusSync);
+    if (ns === 'sincronizado' && ext && !externalIds.has(ext)) {
+      if (await removeLocalVistoriaIfExists(v.id)) removed += 1;
+    }
+  }
+
+  const localsForDedup = await getVistoriasByLeilao(localLeilaoId, { includePendingCloudDelete: true });
+  const localsByKey = new Map<string, (Vistoria & { id: number })[]>();
+
+  for (const v of localsForDedup) {
+    if (v.id == null || v.pendingCloudDelete) continue;
+    const key = placaNumKey(v.placa, v.numeroVistoria);
+    const list = localsByKey.get(key) ?? [];
+    list.push(v as Vistoria & { id: number });
+    localsByKey.set(key, list);
+  }
+
+  // 3) Mesma placa+número: servidor tem 1, aparelho tem 2+ → remove intrusas locais.
+  for (const [key, group] of localsByKey) {
+    if (group.length <= 1) continue;
+    const cloudRef = cloudRowsByKey.get(key);
+    if (!cloudRef) continue;
+
+    let keeper: (Vistoria & { id: number }) | undefined;
+    for (const v of group) {
+      if (v.cloudVistoriaId?.trim() === cloudRef.cloudId) {
+        keeper = v;
+        break;
+      }
+    }
+    if (!keeper && cloudRef.externalId) {
+      keeper = group.find((v) => readStableUuid(v) === cloudRef.externalId);
+    }
+    if (!keeper) {
+      keeper = group.find((v) => normalizeVistoriaStatusSync(v.statusSync) === 'sincronizado');
+    }
+    if (!keeper) continue;
+
+    for (const v of group) {
+      if (v.id === keeper.id) continue;
+      if (shouldPreserveLocalFromCloudReconcile(v)) continue;
+      if (await removeLocalVistoriaIfExists(v.id)) removed += 1;
+    }
+  }
+
+  return removed;
 }
 
 /** Mescla várias linhas retornadas pelo Supabase (mesmo leilão local). */
 export async function mergeVistoriasFromCloudRows(
   localLeilaoId: number,
   rows: Record<string, unknown>[],
-): Promise<void> {
+): Promise<{ removedLocal: number }> {
   for (const row of rows) {
     await mergeCloudRowWithLocalPreservation(localLeilaoId, row);
   }
+  const removedLocal = await reconcileLocalVistoriasWithCloudRows(localLeilaoId, rows);
   const { recalculateDuplicateVistoriasForLeilao } = await import('@/services/duplicateVistoriaRecalc');
   await recalculateDuplicateVistoriasForLeilao(localLeilaoId);
+  return { removedLocal };
 }

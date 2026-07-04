@@ -40,7 +40,6 @@ export default function AuthPage() {
       try {
         const rows = await listUsersByRole(role);
         const safe = Array.isArray(rows) ? rows : [];
-        if (import.meta.env.DEV) console.log('DEBUG lista usuarios (auth):', safe);
         if (!cancelled) {
           setUsuarios(safe);
           if (safe.length === 0) {
