@@ -107,9 +107,10 @@ export default function HistoryPage() {
     setPullingFromCloud(true);
     try {
       await processQueue();
-      const { fetchAndMergeVistoriasFromCloudForLeilao } = await import(
+      const { fetchAndMergeVistoriasFromCloudForLeilao, resyncAllFotosForLeilao } = await import(
         "@/services/inspectionService",
       );
+      await resyncAllFotosForLeilao(id);
       const merged = await fetchAndMergeVistoriasFromCloudForLeilao(id);
       if (!merged.ok) {
         toast({

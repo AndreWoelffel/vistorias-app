@@ -22,6 +22,7 @@ import {
 } from '@/lib/db';
 import { syncLeilaoToCloud } from '@/services/leilaoService';
 import { syncInspectionFromLocal, syncVistoriaUpdateToCloud } from '@/services/inspectionService';
+import { deleteVistoriaFotosBeforeVistoriaDelete } from '@/services/vistoriaFotoService';
 import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict';
 
 export const MAX_SYNC_RETRIES = 5;
@@ -340,6 +341,8 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
       }
       return 'done';
     }
+    const fotosOk = await deleteVistoriaFotosBeforeVistoriaDelete(cloudId);
+    if (!fotosOk) return 'fail';
     const { error } = await supabase.from('vistorias').delete().eq('id', cloudId);
     if (error) return 'fail';
     await deleteVistoria(vid);
