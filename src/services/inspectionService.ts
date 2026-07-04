@@ -496,7 +496,11 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
       const newMs = supabaseTimestampToMs(afterRow?.updated_at);
       if (localVid != null) {
         await updateVistoria(localVid, {
-          statusSync: 'sincronizado', updatedAt: newMs > 0 ? newMs : Date.now(), cloudVistoriaId: String(afterRow?.id || ex.id), fotoUploadFailed: false, ...clearedDuplicateFields,
+          statusSync: 'sincronizado',
+          updatedAt: newMs > 0 ? newMs : Date.now(),
+          cloudVistoriaId: String(afterRow?.id || ex.id),
+          fotoUploadFailed: fotoSync.uploadFailed,
+          ...clearedDuplicateFields,
         });
       }
       return true;
@@ -710,7 +714,11 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
   const afterRow = after as { id?: string; updated_at?: string | null } | null;
   const newMs = supabaseTimestampToMs(afterRow?.updated_at);
   await updateVistoria(localVistoriaId, {
-    statusSync: 'sincronizado', updatedAt: newMs > 0 ? newMs : Date.now(), cloudVistoriaId: String(afterRow?.id || ex.id), fotoUploadFailed: false, ...clearedDuplicateFields,
+    statusSync: 'sincronizado',
+    updatedAt: newMs > 0 ? newMs : Date.now(),
+    cloudVistoriaId: String(afterRow?.id || ex.id),
+    fotoUploadFailed: fotoSync.uploadFailed,
+    ...clearedDuplicateFields,
   });
   return true;
 }

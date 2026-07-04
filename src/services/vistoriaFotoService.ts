@@ -2,6 +2,7 @@
  * Sync de fotos tipadas para public.vistorias_fotos + Storage.
  * Tipos inferidos dos prefixos locais: PLACA_, ADESIVO_, CHASSI_, MOTOR_, FOTO_.
  */
+import { sha256HexFromBlob } from '@/lib/sha256';
 import { supabase } from '@/services/supabaseClient';
 
 export const VISTORIA_FOTOS_BUCKET = 'fotos-vistorias';
@@ -28,7 +29,14 @@ export type SyncVistoriaFotosResult = {
   placaPublicUrl: string | null;
   uploadFailed: boolean;
   uploadedCount: number;
+  failedPaths: string[];
 };
+
+const REQUIRED_TIPOS: VistoriaFotoTipo[] = ['placa', 'adesivo'];
+
+function logFotoSyncError(message: string, detail?: unknown): void {
+  console.error(`[Fotos] ${message}`, detail ?? '');
+}
 
 function fotoKey(tipo: VistoriaFotoTipo, ordem: number): string {
   return `${tipo}:${ordem}`;
@@ -76,9 +84,7 @@ export function getVistoriaFotoPublicUrl(storagePath: string): string {
 }
 
 export async function sha256HexBlob(blob: Blob): Promise<string> {
-  const buf = await blob.arrayBuffer();
-  const hash = await crypto.subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return sha256HexFromBlob(blob);
 }
 
 async function fetchCloudFotoRows(vistoriaCloudId: string): Promise<CloudFotoRow[]> {
@@ -88,7 +94,7 @@ async function fetchCloudFotoRows(vistoriaCloudId: string): Promise<CloudFotoRow
     .eq('vistoria_id', vistoriaCloudId);
 
   if (error) {
-    if (import.meta.env.DEV) console.warn('[Fotos] Falha ao listar vistorias_fotos:', error.message);
+    logFotoSyncError('Falha ao listar vistorias_fotos', error.message);
     return [];
   }
   return (data ?? []) as CloudFotoRow[];
@@ -98,7 +104,7 @@ async function removeStoragePaths(paths: string[]): Promise<boolean> {
   if (paths.length === 0) return true;
   const { error } = await supabase.storage.from(VISTORIA_FOTOS_BUCKET).remove(paths);
   if (error) {
-    if (import.meta.env.DEV) console.warn('[Fotos] Falha ao remover Storage:', error.message);
+    logFotoSyncError('Falha ao remover Storage', error.message);
     return false;
   }
   return true;
@@ -108,7 +114,7 @@ async function deleteCloudFotoRows(ids: string[]): Promise<boolean> {
   if (ids.length === 0) return true;
   const { error } = await supabase.from('vistorias_fotos').delete().in('id', ids);
   if (error) {
-    if (import.meta.env.DEV) console.warn('[Fotos] Falha ao remover vistorias_fotos:', error.message);
+    logFotoSyncError('Falha ao remover vistorias_fotos', error.message);
     return false;
   }
   return true;
@@ -130,6 +136,8 @@ export async function syncVistoriaFotosToCloud(opts: {
   let uploadFailed = false;
   let uploadedCount = 0;
   let placaPublicUrl: string | null = null;
+  const failedPaths: string[] = [];
+  const okKeys = new Set<string>();
 
   const existing = await fetchCloudFotoRows(vistoriaCloudId);
   const existingByKey = new Map<string, CloudFotoRow>();
@@ -162,13 +170,16 @@ export async function syncVistoriaFotosToCloud(opts: {
     let sha256: string;
     try {
       sha256 = await sha256HexBlob(p.blob);
-    } catch {
+    } catch (err) {
       uploadFailed = true;
+      failedPaths.push(storagePath);
+      logFotoSyncError(`SHA-256 falhou (${storagePath})`, err);
       continue;
     }
 
     const prev = existingByKey.get(key);
     if (prev?.sha256 === sha256 && prev.storage_path === storagePath) {
+      okKeys.add(key);
       if (p.tipo === 'placa' && prev.storage_path) {
         placaPublicUrl = getVistoriaFotoPublicUrl(String(prev.storage_path));
       }
@@ -182,7 +193,8 @@ export async function syncVistoriaFotosToCloud(opts: {
 
     if (storageError) {
       uploadFailed = true;
-      if (import.meta.env.DEV) console.warn('[Fotos] Upload falhou:', storagePath, storageError.message);
+      failedPaths.push(storagePath);
+      logFotoSyncError(`Upload falhou (${storagePath})`, storageError.message);
       continue;
     }
 
@@ -206,16 +218,26 @@ export async function syncVistoriaFotosToCloud(opts: {
 
     if (dbError) {
       uploadFailed = true;
-      if (import.meta.env.DEV) console.warn('[Fotos] Upsert vistorias_fotos falhou:', dbError.message);
+      failedPaths.push(storagePath);
+      logFotoSyncError(`Upsert vistorias_fotos falhou (${storagePath})`, dbError.message);
       continue;
     }
 
+    okKeys.add(key);
     if (p.tipo === 'placa') {
       placaPublicUrl = getVistoriaFotoPublicUrl(storagePath);
     }
   }
 
-  return { placaPublicUrl, uploadFailed, uploadedCount };
+  const localRequired = parsed.filter((p) => REQUIRED_TIPOS.includes(p.tipo));
+  const missingRequired = localRequired.some((p) => !okKeys.has(fotoKey(p.tipo, p.ordem)));
+  if (missingRequired) uploadFailed = true;
+
+  if (uploadFailed && failedPaths.length > 0) {
+    logFotoSyncError('Sync incompleto', { failedPaths, uploadedCount, total: parsed.length });
+  }
+
+  return { placaPublicUrl, uploadFailed, uploadedCount, failedPaths };
 }
 
 /**
