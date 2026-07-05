@@ -34,7 +34,6 @@ import {
   runStickerPipelineYOLO,
 } from '@/lib/imageUtils';
 import { useAuth } from '@/hooks/useAuth';
-import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
 import { toast } from '@/hooks/use-toast';
 import { fieldToasts } from '@/lib/uxCopy';
@@ -59,10 +58,8 @@ export default function NewInspection() {
   const navigate = useNavigate();
   const id = routeLeilaoId;
   const { user } = useAuth();
-  const { currentUser } = useCurrentUser();
 
-  // Controle de Permissão (Feature Flag)
-  const isAdmin = user?.role === 'admin' || currentUser?.role === 'admin';
+  const isAdmin = user?.role === 'admin';
   const [debugMode, setDebugMode] = useState(false);
 
   // Estados da UI
@@ -349,8 +346,8 @@ export default function NewInspection() {
     setStep('saving');
     
     try {
-      const createdBy = currentUser?.nome?.trim() || user?.nome?.trim() || 'Desconhecido';
-      const createdByUserId = currentUser?.id != null ? String(currentUser.id) : null;
+      const createdBy = user?.nome?.trim() || 'Desconhecido';
+      const createdByUserId = user?.id?.trim() || null;
       let localUuid: string;
 
       try {

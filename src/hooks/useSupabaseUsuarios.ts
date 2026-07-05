@@ -43,8 +43,8 @@ export function useSupabaseUsuarios() {
   );
 
   const toggleUsuarioAtivo = useCallback(
-    async (usuarioId: string, ativo: boolean) => {
-      await setUsuarioAtivo(usuarioId, ativo);
+    async (usuarioId: string, ativo: boolean, actorUserId?: string) => {
+      await setUsuarioAtivo(usuarioId, ativo, actorUserId);
       await refresh();
     },
     [refresh],

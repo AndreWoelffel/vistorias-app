@@ -6,7 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { AppHeader } from "@/components/AppHeader";
 import { useLeiloes } from "@/hooks/useVistorias";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { useAuth } from "@/hooks/useAuth";
+import { SessionUserBar } from "@/components/SessionUserBar";
 import { toast } from "@/hooks/use-toast";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { countVistorias } from "@/lib/db";
@@ -55,8 +56,8 @@ type DeleteTarget = {
 
 export default function LeiloesPage() {
   const navigate = useNavigate();
-  const { currentUser, loading: loadingUser } = useCurrentUser();
-  const canDeleteLeiloes = currentUser?.role === "admin";
+  const { user } = useAuth();
+  const canDeleteLeiloes = user?.role === "admin";
   const {
     leiloes,
     loading,
@@ -268,18 +269,9 @@ export default function LeiloesPage() {
       <AppHeader title="Leilões" showBack onBack={() => navigate("/")} />
 
       <div className="px-4 pt-2">
-        <p className="text-xs text-muted-foreground">
-          Usuário atual:{" "}
-          {loadingUser ? (
-            "…"
-          ) : currentUser ? (
-            <>
-              <span className="font-semibold text-foreground">{currentUser.nome}</span> ({currentUser.role})
-            </>
-          ) : (
-            "—"
-          )}
-        </p>
+        <SessionUserBar
+          hint="Crie, renomeie e sincronize leilões com o Supabase. A exclusão remove vistorias locais e enfileira delete na nuvem."
+        />
       </div>
 
       <div className="flex-1 p-4 space-y-4">

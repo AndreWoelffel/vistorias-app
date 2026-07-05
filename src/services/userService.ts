@@ -180,7 +180,14 @@ export async function login(nomeLogin: string, senha: string): Promise<SupabaseU
  * Ativa/desativa usuário (desativação lógica). Não remove linha no Supabase.
  * Impede desativar o único admin ativo.
  */
-export async function setUsuarioAtivo(usuarioId: string, ativo: boolean): Promise<void> {
+export async function setUsuarioAtivo(
+  usuarioId: string,
+  ativo: boolean,
+  actorUserId?: string,
+): Promise<void> {
+  if (!ativo && actorUserId && actorUserId === usuarioId) {
+    throw new Error('Você não pode desativar sua própria conta.');
+  }
   const list = await listAllUsuariosAdmin();
   const target = list.find((u) => u.id === usuarioId);
   if (!target) {

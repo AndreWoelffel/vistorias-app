@@ -182,7 +182,7 @@ export async function countFailedQueueForLeilao(leilaoId: number): Promise<numbe
   return n;
 }
 
-/** Item exibido no hub — vistorias recentes com estado de fila (mais recente no topo). */
+/** Item exibido no hub — vistorias recentes com estado de fila. */
 export type LeilaoSyncQueueEntry = {
   vistoriaId: number;
   placa: string;
@@ -193,12 +193,13 @@ export type LeilaoSyncQueueEntry = {
   duplicateType?: Vistoria["duplicateType"];
   inQueue: boolean;
   queueFailed: boolean;
-  sortTs: number;
+  /** Quando a vistoria foi feita no aparelho (`createdAt`). */
+  createdAtTs: number;
 };
 
 /**
- * Lista vistorias do leilão ordenadas por envio mais recente (topo = última na fila).
- * Usa `createdAt` da fila quando a vistoria ainda está enfileirada; senão `updatedAt`/`createdAt`.
+ * Lista vistorias do leilão ordenadas pela data da vistoria (mais recente primeiro).
+ * Não usa `updatedAt` nem horário de sync — alinhado ao Histórico.
  */
 async function buildLeilaoSyncEntries(leilaoId: number): Promise<LeilaoSyncQueueEntry[]> {
   const [vistorias, queue] = await Promise.all([
@@ -228,9 +229,9 @@ async function buildLeilaoSyncEntries(leilaoId: number): Promise<LeilaoSyncQueue
       !qItem.retryPaused &&
       (qItem.nextAttemptAfter == null || qItem.nextAttemptAfter <= Date.now());
 
-    const vUpdated = v.updatedAt ? new Date(v.updatedAt).getTime() : 0;
     const vCreated = v.createdAt ? new Date(v.createdAt).getTime() : 0;
-    const sortTs = qItem?.createdAt ?? Math.max(vUpdated, vCreated);
+    const vUpdated = v.updatedAt ? new Date(v.updatedAt).getTime() : 0;
+    const createdAtTs = vCreated > 0 ? vCreated : vUpdated;
 
     entries.push({
       vistoriaId: v.id,
@@ -242,11 +243,11 @@ async function buildLeilaoSyncEntries(leilaoId: number): Promise<LeilaoSyncQueue
       duplicateType: v.duplicateType,
       inQueue,
       queueFailed,
-      sortTs,
+      createdAtTs,
     });
   }
 
-  return entries.sort((a, b) => b.sortTs - a.sortTs);
+  return entries.sort((a, b) => b.createdAtTs - a.createdAtTs || b.vistoriaId - a.vistoriaId);
 }
 
 export async function listLeilaoSyncQueueEntries(

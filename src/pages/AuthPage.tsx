@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ClipboardCheck, User, Shield, Eye, EyeOff, Loader2 } from 'lucide-react';
+import { ClipboardCheck, User, Shield, Eye, EyeOff, Loader2, WifiOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useAuth } from '@/hooks/useAuth';
+import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { toast } from '@/hooks/use-toast';
 import { listUsersByRole, login as loginUsuario, type UsuarioListItem } from '@/services/userService';
 
@@ -12,6 +13,7 @@ const PIN_REGEX = /^\d{4}$/;
 export default function AuthPage() {
   const navigate = useNavigate();
   const { login } = useAuth();
+  const online = useOnlineStatus();
   const [role, setRole] = useState<'vistoriador' | 'admin' | null>(null);
   const [usuarios, setUsuarios] = useState<UsuarioListItem[]>([]);
   const [listLoading, setListLoading] = useState(false);
@@ -38,6 +40,13 @@ export default function AuthPage() {
 
     void (async () => {
       try {
+        if (!online) {
+          if (!cancelled) {
+            setUsuarios([]);
+            setListError('Sem internet. Conecte-se para carregar a lista de usuários.');
+          }
+          return;
+        }
         const rows = await listUsersByRole(role);
         const safe = Array.isArray(rows) ? rows : [];
         if (!cancelled) {
@@ -59,7 +68,7 @@ export default function AuthPage() {
     return () => {
       cancelled = true;
     };
-  }, [role]);
+  }, [role, online]);
 
   const handleLogin = async () => {
     if (!role || !selected) {
@@ -176,7 +185,10 @@ export default function AuthPage() {
                 <span className="text-sm">Carregando lista…</span>
               </div>
             ) : listError ? (
-              <p className="text-sm text-destructive py-2">{listError}</p>
+              <div className="py-2 space-y-2">
+                {!online ? <WifiOff className="h-5 w-5 text-muted-foreground mx-auto" /> : null}
+                <p className="text-sm text-destructive text-center">{listError}</p>
+              </div>
             ) : (
               <ul className="max-h-48 overflow-y-auto rounded-lg border border-border divide-y divide-border">
                 {(usuarios ?? []).map((u) => (

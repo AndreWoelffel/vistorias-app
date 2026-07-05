@@ -48,7 +48,9 @@ CREATE INDEX IF NOT EXISTS idx_vistorias_fotos_vistoria_id
 -- =============================================================================
 -- 3) View para consulta externa (placa, número, leilão)
 -- =============================================================================
-CREATE OR REPLACE VIEW public.vistorias_fotos_com_leilao AS
+DROP VIEW IF EXISTS public.vistorias_fotos_com_leilao CASCADE;
+
+CREATE VIEW public.vistorias_fotos_com_leilao AS
 SELECT
   vf.id,
   vf.vistoria_id,

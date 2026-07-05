@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { AppHeader } from '@/components/AppHeader';
+import { SessionUserBar } from '@/components/SessionUserBar';
 import { useAuth } from '@/hooks/useAuth';
 import { useSupabaseUsuarios, type AppUsuarioRole } from '@/hooks/useSupabaseUsuarios';
 import { toast } from '@/hooks/use-toast';
@@ -93,12 +94,20 @@ export default function UsuariosPage() {
   };
 
   const handleToggleAtivo = async (usuarioId: string, nextAtivo: boolean) => {
+    if (!nextAtivo && usuarioId === user.id) {
+      toast({
+        title: 'Ação não permitida',
+        description: 'Você não pode desativar sua própria conta enquanto estiver logado.',
+        variant: 'destructive',
+      });
+      return;
+    }
     if (!confirm(nextAtivo ? 'Reativar este usuário?' : 'Desativar este usuário? Ele não poderá mais entrar no app.')) {
       return;
     }
     setTogglingId(usuarioId);
     try {
-      await toggleUsuarioAtivo(usuarioId, nextAtivo);
+      await toggleUsuarioAtivo(usuarioId, nextAtivo, user.id);
       toast({
         title: nextAtivo ? 'Usuário reativado' : 'Usuário desativado',
         description: nextAtivo ? 'O login voltou a ser permitido.' : 'O registro permanece no banco para histórico.',
@@ -120,17 +129,7 @@ export default function UsuariosPage() {
       <AppHeader title="Usuários" showBack onBack={() => navigate('/')} />
 
       <div className="flex-1 p-4 space-y-4">
-        <div className="rounded-xl border border-border/60 bg-card/50 px-3 py-2">
-          <p className="text-xs text-muted-foreground">
-            Logado como <span className="font-semibold text-foreground">{user.nome}</span>{' '}
-            <Badge variant="default" className="text-[10px] ml-1">
-              admin
-            </Badge>
-          </p>
-          <p className="text-[11px] text-muted-foreground mt-1 leading-snug">
-            Usuários cadastrados aqui podem entrar no app com nome e senha de 4 dígitos. O nome deve ser único.
-          </p>
-        </div>
+        <SessionUserBar hint="Usuários cadastrados aqui entram no login com nome e senha de 4 dígitos. O nome deve ser único." />
 
         <Button
           className="w-full h-12 gap-2 font-semibold rounded-xl"
@@ -205,7 +204,7 @@ export default function UsuariosPage() {
                       size="sm"
                       variant="outline"
                       className="h-9 gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10"
-                      disabled={togglingId === u.id}
+                      disabled={togglingId === u.id || u.id === user.id}
                       onClick={() => void handleToggleAtivo(u.id, false)}
                     >
                       {togglingId === u.id ? (
@@ -213,7 +212,7 @@ export default function UsuariosPage() {
                       ) : (
                         <UserX className="h-4 w-4" />
                       )}
-                      Desativar
+                      {u.id === user.id ? 'Sua conta' : 'Desativar'}
                     </Button>
                   )}
                 </div>

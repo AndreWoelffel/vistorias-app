@@ -454,6 +454,31 @@ export async function processQueue(): Promise<ProcessQueueResult> {
   return { processed, failed, skipped: false, rounds, remainingInBackoff };
 }
 
+export type SyncLeilaoFromCloudResult =
+  | { ok: true; rowCount: number; removedLocal: number }
+  | { ok: false; offline?: boolean; message?: string };
+
+/** Envia fila, reenvia fotos e puxa vistorias do servidor para o leilão local. */
+export async function syncLeilaoFromCloud(localLeilaoId: number): Promise<SyncLeilaoFromCloudResult> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { ok: false, offline: true };
+  }
+  try {
+    await processQueue();
+    const { fetchAndMergeVistoriasFromCloudForLeilao, resyncAllFotosForLeilao } = await import(
+      '@/services/inspectionService',
+    );
+    await resyncAllFotosForLeilao(localLeilaoId);
+    const merged = await fetchAndMergeVistoriasFromCloudForLeilao(localLeilaoId);
+    if (!merged.ok) {
+      return { ok: false, message: 'Não foi possível buscar os dados do servidor.' };
+    }
+    return { ok: true, rowCount: merged.rowCount, removedLocal: merged.removedLocal };
+  } catch {
+    return { ok: false, message: 'Erro de sincronização.' };
+  }
+}
+
 export type EnqueueVistoriaResyncResult =
   | { ok: true }
   | { ok: false; blocked: true; message: string }

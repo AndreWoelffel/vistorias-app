@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useAutoSyncLeilaoOnEnter } from "@/hooks/useAutoSyncLeilaoOnEnter";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import {
   getLeilaoHubSnapshot,
@@ -87,7 +88,7 @@ function VistoriaCard({
           <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">
             #{entry.numeroVistoria}
             <span className="mx-1.5 text-border">·</span>
-            {formatShortTime(entry.sortTs)}
+            {formatShortTime(entry.createdAtTs)}
           </p>
           {entry.duplicateType && (
             <p className="text-[10px] font-semibold text-red-600 dark:text-red-400 mt-1">
@@ -143,6 +144,8 @@ export function HubSyncQueue({ leilaoId }: Props) {
       setLoading(false);
     }
   }, [leilaoId]);
+
+  useAutoSyncLeilaoOnEnter(leilaoId, true, load);
 
   useEffect(() => {
     setLoading(true);
