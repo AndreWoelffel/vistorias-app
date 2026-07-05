@@ -2,7 +2,7 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 import { X, ImagePlus, RefreshCw, AlertTriangle, Camera } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { PlateFrameEditor } from '@/components/PlateFrameEditor';
+import { PlateFrameEditor, PLATE_FRAME_MAX_PX, PLATE_FRAME_VW } from '@/components/PlateFrameEditor';
 import {
   PLATE_CAPTURE_THRESHOLDS,
   scanFrameForSticker,
@@ -40,7 +40,7 @@ const MODE_CONFIG = {
     defaultTitle: 'Leitura Automática da Placa',
     hint: 'Aponte a câmera para a placa',
     detectedLabel: (n: number) => `${n}/7 caractere(s) detectado(s)`,
-    viewfinderAR: '4 / 1',
+    squareCenterCrop: true,
   },
   sticker: {
     scanFn: async (canvas: HTMLCanvasElement) => ({
@@ -53,7 +53,7 @@ const MODE_CONFIG = {
     defaultTitle: 'Leitura Automática do Adesivo',
     hint: 'Aponte a câmera para o adesivo',
     detectedLabel: (n: number) => `${n}/5 dígito(s) detectado(s)`,
-    viewfinderAR: '3 / 1',
+    squareCenterCrop: false,
   },
 } as const;
 
@@ -127,6 +127,7 @@ export function RealtimeScannerCamera({
     targetCharCount: cfg.targetCount,
     inferenceIntervalMs: inferenceIntervalMs ?? cfg.defaultInferenceMs,
     stableFramesNeeded: cfg.stableFramesNeeded,
+    squareCenterCrop: cfg.squareCenterCrop,
   });
 
   const handleManualCapture = useCallback(() => {
@@ -257,10 +258,17 @@ export function RealtimeScannerCamera({
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
               <div
                 className={cn(
-                  'border-2 rounded-lg transition-colors duration-200 w-[85vw] max-w-sm',
+                  'border-2 rounded-lg transition-colors duration-200',
                   viewfinderColor,
                 )}
-                style={{ aspectRatio: cfg.viewfinderAR }}
+                style={
+                  mode === 'plate'
+                    ? {
+                        width: `min(${PLATE_FRAME_VW}vw, ${PLATE_FRAME_MAX_PX}px)`,
+                        height: `min(${PLATE_FRAME_VW}vw, ${PLATE_FRAME_MAX_PX}px)`,
+                      }
+                    : { aspectRatio: '3 / 1', width: 'min(85vw, 24rem)' }
+                }
               />
             </div>
 

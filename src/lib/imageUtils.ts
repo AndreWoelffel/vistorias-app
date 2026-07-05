@@ -821,12 +821,12 @@ export async function scanFrameForPlate(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export const PLATE_CAPTURE_THRESHOLDS = {
-  minCharConfidence: 85,
-  minAvgConfidence: 88,
-  minSharpness: 80,
+  minCharConfidence: 75,
+  minAvgConfidence: 80,
+  minSharpness: 45,
   targetCharCount: 7,
-  stableFramesNeeded: 3,
-  inferenceIntervalMs: 400,
+  stableFramesNeeded: 2,
+  inferenceIntervalMs: 350,
 } as const;
 
 export function isMercosulPlateFormat(text: string): boolean {

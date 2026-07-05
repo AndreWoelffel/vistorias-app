@@ -55,6 +55,8 @@ interface UseRealtimeScannerOptions {
   targetCharCount: number;
   inferenceIntervalMs?: number;
   stableFramesNeeded?: number;
+  /** Recorte quadrado centralizado (placa / moto) — igual à galeria e CameraCapture */
+  squareCenterCrop?: boolean;
 }
 
 function normalizeScanResult(
@@ -116,12 +118,31 @@ function drawBoxesOnCanvas(
 
 function snapVideoFrame(
   video: HTMLVideoElement,
+  squareCenterCrop = false,
 ): Promise<{ blob: Blob; canvas: HTMLCanvasElement }> {
   return new Promise((resolve, reject) => {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
     const c = document.createElement('canvas');
-    c.width = video.videoWidth;
-    c.height = video.videoHeight;
-    c.getContext('2d')!.drawImage(video, 0, 0);
+    const ctx = c.getContext('2d');
+    if (!ctx || vw === 0 || vh === 0) {
+      reject(new Error('snap: invalid video'));
+      return;
+    }
+
+    if (squareCenterCrop) {
+      const cropSize = Math.min(vw, vh);
+      const startX = (vw - cropSize) / 2;
+      const startY = (vh - cropSize) / 2;
+      c.width = cropSize;
+      c.height = cropSize;
+      ctx.drawImage(video, startX, startY, cropSize, cropSize, 0, 0, cropSize, cropSize);
+    } else {
+      c.width = vw;
+      c.height = vh;
+      ctx.drawImage(video, 0, 0);
+    }
+
     c.toBlob(
       (b) => (b ? resolve({ blob: b, canvas: c }) : reject(new Error('toBlob: null'))),
       'image/jpeg',
@@ -140,6 +161,7 @@ export function useRealtimeScanner({
   targetCharCount,
   inferenceIntervalMs = DEFAULT_INFERENCE_INTERVAL_MS,
   stableFramesNeeded = STABLE_FRAMES_NEEDED,
+  squareCenterCrop = false,
 }: UseRealtimeScannerOptions): RealtimeScannerControls {
   const rafRef = useRef<number | null>(null);
   const inferringRef = useRef(false);
@@ -153,12 +175,14 @@ export function useRealtimeScanner({
   const targetCountRef = useRef(targetCharCount);
   const inferenceIntervalRef = useRef(inferenceIntervalMs);
   const stableFramesRef = useRef(stableFramesNeeded);
+  const squareCropRef = useRef(squareCenterCrop);
 
   useEffect(() => { onAutoCaptureRef.current = onAutoCapture; }, [onAutoCapture]);
   useEffect(() => { scanFnRef.current = scanFn; }, [scanFn]);
   useEffect(() => { targetCountRef.current = targetCharCount; }, [targetCharCount]);
   useEffect(() => { inferenceIntervalRef.current = inferenceIntervalMs; }, [inferenceIntervalMs]);
   useEffect(() => { stableFramesRef.current = stableFramesNeeded; }, [stableFramesNeeded]);
+  useEffect(() => { squareCropRef.current = squareCenterCrop; }, [squareCenterCrop]);
 
   const [state, setState] = useState<RealtimeScannerState>({
     boxes: [],
@@ -204,7 +228,10 @@ export function useRealtimeScanner({
     let frameBlob: Blob;
     let frameCanvas: HTMLCanvasElement;
     try {
-      ({ blob: frameBlob, canvas: frameCanvas } = await snapVideoFrame(video));
+      ({ blob: frameBlob, canvas: frameCanvas } = await snapVideoFrame(
+        video,
+        squareCropRef.current,
+      ));
     } catch {
       return;
     }
@@ -278,7 +305,7 @@ export function useRealtimeScanner({
 
     if ('vibrate' in navigator) navigator.vibrate(100);
 
-    snapVideoFrame(video)
+    snapVideoFrame(video, squareCropRef.current)
       .then(async ({ blob, canvas }) => {
         let result: RealtimeScanFrameResult = { boxes: [] };
         try {

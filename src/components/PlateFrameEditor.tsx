@@ -2,12 +2,10 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 import { Check, RotateCcw, Move } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
-// Constantes para Placa (Retângulo)
-const PLATE_FRAME_VW = 78;
-const PLATE_FRAME_MAX_W = 320;
-const PLATE_FRAME_MAX_H = 320; // Agora é um quadrado perfeito
-const PLATE_EXPORT_W = 640;
-const PLATE_EXPORT_H = 640; // Ideal para a entrada do YOLO
+// Constantes compartilhadas — galeria, câmera manual e scanner em tempo real
+export const PLATE_FRAME_VW = 78;
+export const PLATE_FRAME_MAX_PX = 320;
+export const PLATE_EXPORT_SIZE = 640;
 
 // Constantes para Adesivo (Quadrado 1:1)
 const STICKER_FRAME_VW = 78;
@@ -59,8 +57,8 @@ export function PlateFrameEditor({ imageUrl, overlayType, onConfirm, onCancel }:
       const side = Math.min(rect.width * (STICKER_FRAME_VW / 100), STICKER_FRAME_MAX_PX);
       return { w: side, h: side, left: (rect.width - side) / 2, top: (rect.height - side) / 2 };
     } else {
-      const w = Math.min(rect.width * (PLATE_FRAME_VW / 100), PLATE_FRAME_MAX_W);
-      const h = w; // Força a proporção 1:1 baseada na largura
+      const w = Math.min(rect.width * (PLATE_FRAME_VW / 100), PLATE_FRAME_MAX_PX);
+      const h = w;
       return { w, h, left: (rect.width - w) / 2, top: (rect.height - h) / 2 };
     }
   }, [getContainerRect, overlayType]);
@@ -167,8 +165,8 @@ export function PlateFrameEditor({ imageUrl, overlayType, onConfirm, onCancel }:
     let safeW = sw;
     let safeH = sh;
     
-    const targetExportW = overlayType === 'number' ? STICKER_EXPORT_SIZE : PLATE_EXPORT_W;
-    const targetExportH = overlayType === 'number' ? STICKER_EXPORT_SIZE : PLATE_EXPORT_H;
+    const targetExportW = overlayType === 'number' ? STICKER_EXPORT_SIZE : PLATE_EXPORT_SIZE;
+    const targetExportH = overlayType === 'number' ? STICKER_EXPORT_SIZE : PLATE_EXPORT_SIZE;
 
     if (overlayType === 'number') {
       const minDim = Math.min(sw, sh);
@@ -257,8 +255,8 @@ export function PlateFrameEditor({ imageUrl, overlayType, onConfirm, onCancel }:
           <div
             className={`border-2 border-primary rounded-lg bg-primary/10 shadow-[0_0_0_9999px_rgba(0,0,0,0.7)] transition-all`}
             style={{
-              width: overlayType === 'number' ? `min(${STICKER_FRAME_VW}vw, ${STICKER_FRAME_MAX_PX}px)` : `min(${PLATE_FRAME_VW}vw, ${PLATE_FRAME_MAX_W}px)`,
-              height: overlayType === 'number' ? `min(${STICKER_FRAME_VW}vw, ${STICKER_FRAME_MAX_PX}px)` : `${PLATE_FRAME_MAX_H}px`,
+              width: overlayType === 'number' ? `min(${STICKER_FRAME_VW}vw, ${STICKER_FRAME_MAX_PX}px)` : `min(${PLATE_FRAME_VW}vw, ${PLATE_FRAME_MAX_PX}px)`,
+              height: overlayType === 'number' ? `min(${STICKER_FRAME_VW}vw, ${STICKER_FRAME_MAX_PX}px)` : `min(${PLATE_FRAME_VW}vw, ${PLATE_FRAME_MAX_PX}px)`,
             }}
           />
         </div>
