@@ -772,11 +772,9 @@ export async function scanFrameForSticker(
   return charBoxes;
 }
 
-// Versão da função de scan para o modelo de PLACAS (model_yolo_placas).
-// Idêntica a scanFrameForSticker, mas usa loadYOLOModel() em vez de
-// loadYOLOVistoriasModel() — mantém os dois modelos completamente separados.
-export async function scanFrameForPlate(
-  frameCanvas: HTMLCanvasElement
+// ── Inferência YOLO de placas em um frame (canvas nativo da câmera) ─────────
+async function detectPlateCharBoxesOnCanvas(
+  frameCanvas: HTMLCanvasElement,
 ): Promise<YOLOBox[]> {
   const yolo = await loadYOLOModel();
   if (!yolo) return [];
@@ -809,6 +807,234 @@ export async function scanFrameForPlate(
   else output.dispose();
 
   return charBoxes;
+}
+
+/** Scan leve (só YOLO) — usado pelo adesivo e como etapa 1 da placa. */
+export async function scanFrameForPlate(
+  frameCanvas: HTMLCanvasElement,
+): Promise<YOLOBox[]> {
+  return detectPlateCharBoxesOnCanvas(frameCanvas);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Gate de captura da placa: YOLO + CNN + nitidez (preview em tempo real)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const PLATE_CAPTURE_THRESHOLDS = {
+  minCharConfidence: 85,
+  minAvgConfidence: 88,
+  minSharpness: 80,
+  targetCharCount: 7,
+  stableFramesNeeded: 3,
+  inferenceIntervalMs: 400,
+} as const;
+
+export function isMercosulPlateFormat(text: string): boolean {
+  return /^[A-Z]{3}\d[A-Z]\d{2}$/.test(text);
+}
+
+export type PlateFrameScanResult = {
+  boxes: YOLOBox[];
+  plateText: string;
+  avgConfidence: number;
+  charConfidences: number[];
+  sharpness: number;
+  passesGate: boolean;
+  gateReason?: 'chars' | 'blur' | 'format' | 'char_conf' | 'avg_conf';
+};
+
+/** Variância do Laplaciano na região dos caracteres — rejeita motion blur. */
+function measureRegionSharpness(
+  imageData: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): number {
+  const rx1 = Math.max(0, Math.floor(x1));
+  const ry1 = Math.max(0, Math.floor(y1));
+  const rx2 = Math.min(width, Math.ceil(x2));
+  const ry2 = Math.min(height, Math.ceil(y2));
+  const rw = rx2 - rx1;
+  const rh = ry2 - ry1;
+  if (rw < 8 || rh < 8) return 0;
+
+  const maxDim = 160;
+  const scale = Math.min(1, maxDim / Math.max(rw, rh));
+  const sw = Math.max(8, Math.round(rw * scale));
+  const sh = Math.max(8, Math.round(rh * scale));
+
+  const gray = new Float32Array(sw * sh);
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      const sx = rx1 + (x / sw) * rw;
+      const sy = ry1 + (y / sh) * rh;
+      const ix = Math.min(width - 1, Math.floor(sx));
+      const iy = Math.min(height - 1, Math.floor(sy));
+      const i = (iy * width + ix) * 4;
+      gray[y * sw + x] =
+        imageData[i] * 0.299 + imageData[i + 1] * 0.587 + imageData[i + 2] * 0.114;
+    }
+  }
+
+  let sum = 0;
+  let sumSq = 0;
+  let n = 0;
+  for (let y = 1; y < sh - 1; y++) {
+    for (let x = 1; x < sw - 1; x++) {
+      const c = gray[y * sw + x];
+      const lap =
+        -4 * c +
+        gray[(y - 1) * sw + x] +
+        gray[(y + 1) * sw + x] +
+        gray[y * sw + (x - 1)] +
+        gray[y * sw + (x + 1)];
+      sum += lap;
+      sumSq += lap * lap;
+      n++;
+    }
+  }
+  if (n === 0) return 0;
+  const mean = sum / n;
+  return sumSq / n - mean * mean;
+}
+
+function evaluatePlateCaptureGate(
+  charConfidences: number[],
+  avgConfidence: number,
+  plateText: string,
+  sharpness: number,
+): { passes: boolean; reason?: PlateFrameScanResult['gateReason'] } {
+  if (charConfidences.length < PLATE_CAPTURE_THRESHOLDS.targetCharCount) {
+    return { passes: false, reason: 'chars' };
+  }
+  if (sharpness < PLATE_CAPTURE_THRESHOLDS.minSharpness) {
+    return { passes: false, reason: 'blur' };
+  }
+  if (!isMercosulPlateFormat(plateText)) {
+    return { passes: false, reason: 'format' };
+  }
+  const minChar = Math.min(...charConfidences);
+  if (minChar < PLATE_CAPTURE_THRESHOLDS.minCharConfidence) {
+    return { passes: false, reason: 'char_conf' };
+  }
+  if (avgConfidence < PLATE_CAPTURE_THRESHOLDS.minAvgConfidence) {
+    return { passes: false, reason: 'avg_conf' };
+  }
+  return { passes: true };
+}
+
+async function classifyPlateCharsOnFrame(
+  frameCanvas: HTMLCanvasElement,
+  boxes: YOLOBox[],
+): Promise<{ plateText: string; avgConfidence: number; charConfidences: number[] }> {
+  const cnn = await loadCNNModel();
+  if (!cnn || boxes.length === 0) {
+    return { plateText: '', avgConfidence: 0, charConfidences: [] };
+  }
+
+  const origW = frameCanvas.width;
+  const origH = frameCanvas.height;
+  const imageDataObj = frameCanvas.getContext('2d')!.getImageData(0, 0, origW, origH);
+  const imageData = imageDataObj.data;
+
+  const sorted = boxes
+    .slice(0, PLATE_CAPTURE_THRESHOLDS.targetCharCount)
+    .sort((a, b) => a.x - b.x);
+
+  const charResults: { char: string; confidence: number }[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const { tensor } = cropAndPrepareForCNN(imageData, origW, origH, sorted[i]);
+    charResults.push(await predictCharWithCNN(cnn, tensor, i));
+  }
+
+  let plateText = charResults.map((r) => r.char).join('');
+  const charConfidences = charResults.map((r) => r.confidence);
+  const avgConfidence =
+    charConfidences.length > 0
+      ? charConfidences.reduce((s, c) => s + c, 0) / charConfidences.length
+      : 0;
+
+  if (plateText.length >= PLATE_CAPTURE_THRESHOLDS.targetCharCount) {
+    plateText = applyMercosulMask(plateText);
+  }
+
+  return { plateText, avgConfidence, charConfidences };
+}
+
+/**
+ * Preview da placa: YOLO localiza → CNN classifica → nitidez.
+ * Só retorna `passesGate: true` quando todos os critérios são atendidos.
+ */
+export async function scanFrameForPlateWithCNN(
+  frameCanvas: HTMLCanvasElement,
+): Promise<PlateFrameScanResult> {
+  const boxes = await detectPlateCharBoxesOnCanvas(frameCanvas);
+  const empty: PlateFrameScanResult = {
+    boxes,
+    plateText: '',
+    avgConfidence: 0,
+    charConfidences: [],
+    sharpness: 0,
+    passesGate: false,
+    gateReason: 'chars',
+  };
+
+  if (boxes.length < PLATE_CAPTURE_THRESHOLDS.targetCharCount) {
+    return empty;
+  }
+
+  const origW = frameCanvas.width;
+  const origH = frameCanvas.height;
+  const imageData = frameCanvas.getContext('2d')!.getImageData(0, 0, origW, origH).data;
+  const pad = 8;
+  const minX = Math.max(0, Math.min(...boxes.map((b) => b.x)) - pad);
+  const minY = Math.max(0, Math.min(...boxes.map((b) => b.y)) - pad);
+  const maxX = Math.min(origW, Math.max(...boxes.map((b) => b.x + b.w)) + pad);
+  const maxY = Math.min(origH, Math.max(...boxes.map((b) => b.y + b.h)) + pad);
+  const sharpness = measureRegionSharpness(imageData, origW, origH, minX, minY, maxX, maxY);
+
+  const { plateText, avgConfidence, charConfidences } = await classifyPlateCharsOnFrame(
+    frameCanvas,
+    boxes,
+  );
+
+  const { passes, reason } = evaluatePlateCaptureGate(
+    charConfidences,
+    avgConfidence,
+    plateText,
+    sharpness,
+  );
+
+  return {
+    boxes,
+    plateText,
+    avgConfidence,
+    charConfidences,
+    sharpness,
+    passesGate: passes,
+    gateReason: passes ? undefined : reason,
+  };
+}
+
+/** Adapta o resultado da placa para o hook de scanner em tempo real. */
+export async function scanPlateFrameForRealtime(
+  frameCanvas: HTMLCanvasElement,
+): Promise<{
+  boxes: YOLOBox[];
+  ready: boolean;
+  previewText?: string;
+  previewConfidence?: number;
+}> {
+  const result = await scanFrameForPlateWithCNN(frameCanvas);
+  return {
+    boxes: result.boxes,
+    ready: result.passesGate,
+    previewText: result.plateText || undefined,
+    previewConfidence: result.avgConfidence > 0 ? result.avgConfidence : undefined,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

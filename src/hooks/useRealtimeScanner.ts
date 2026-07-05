@@ -9,37 +9,59 @@ export interface ScanCapture {
   originalImageBlob: Blob;
   /** Caixas detectadas pelo YOLO no frame capturado */
   yoloData: YOLOBox[];
+  /** Placa lida no frame capturado (modo placa com gate CNN) */
+  previewText?: string;
+  previewConfidence?: number;
+}
+
+export interface RealtimeScanFrameResult {
+  boxes: YOLOBox[];
+  /**
+   * Quando definido, controla a estabilidade em vez de só contar caixas.
+   * Ex.: placa só fica pronta após CNN + nitidez + formato Mercosul.
+   */
+  ready?: boolean;
+  previewText?: string;
+  previewConfidence?: number;
 }
 
 export interface RealtimeScannerState {
   boxes: YOLOBox[];
-  stableCount: number;  // 0..STABLE_FRAMES_NEEDED
-  isLocked: boolean;    // true após auto-capture ou captureNow()
+  stableCount: number;
+  isLocked: boolean;
+  previewText?: string;
+  previewConfidence?: number;
 }
 
 export interface RealtimeScannerControls extends RealtimeScannerState {
-  /** Força captura imediata, mesmo sem estabilidade suficiente */
+  /** Força captura imediata no frame atual (com scan no mesmo frame) */
   captureNow: () => void;
 }
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
-export const STABLE_FRAMES_NEEDED      = 4;    // frames estáveis consecutivos para auto-disparo
-const DEFAULT_INFERENCE_INTERVAL_MS    = 250;  // ~4 fps de inferência — equilíbrio térmico/responsividade
+export const STABLE_FRAMES_NEEDED = 4;
+const DEFAULT_INFERENCE_INTERVAL_MS = 250;
+
+type ScanFn = (
+  canvas: HTMLCanvasElement,
+) => Promise<RealtimeScanFrameResult | YOLOBox[]>;
 
 interface UseRealtimeScannerOptions {
   videoRef: React.RefObject<HTMLVideoElement>;
   overlayCanvasRef: React.RefObject<HTMLCanvasElement>;
   enabled: boolean;
   onAutoCapture: (capture: ScanCapture) => void;
-  /** Função de detecção: recebe canvas de frame, retorna YOLOBox[] */
-  scanFn: (canvas: HTMLCanvasElement) => Promise<YOLOBox[]>;
-  /** Número de caracteres para considerar a detecção completa (5 adesivo, 7 placa) */
+  scanFn: ScanFn;
   targetCharCount: number;
-  /**
-   * Intervalo mínimo entre inferências em ms (default 250 ≈ 4 fps).
-   * O <video> continua fluido a 30/60 fps — apenas a chamada ao YOLO é throttled.
-   */
   inferenceIntervalMs?: number;
+  stableFramesNeeded?: number;
+}
+
+function normalizeScanResult(
+  raw: RealtimeScanFrameResult | YOLOBox[],
+): RealtimeScanFrameResult {
+  if (Array.isArray(raw)) return { boxes: raw };
+  return raw;
 }
 
 // ─── Utilitário de overlay ────────────────────────────────────────────────────
@@ -49,6 +71,7 @@ function drawBoxesOnCanvas(
   videoNatW: number,
   videoNatH: number,
   stableCount: number,
+  stableFramesNeeded: number,
 ) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -59,13 +82,12 @@ function drawBoxesOnCanvas(
 
   if (boxes.length === 0) return;
 
-  // object-contain: escala uniforme com offset de letterbox
-  const scale   = Math.min(cW / videoNatW, cH / videoNatH);
+  const scale = Math.min(cW / videoNatW, cH / videoNatH);
   const offsetX = (cW - videoNatW * scale) / 2;
   const offsetY = (cH - videoNatH * scale) / 2;
 
-  const progress = Math.min(stableCount / STABLE_FRAMES_NEEDED, 1);
-  const isStable = stableCount >= STABLE_FRAMES_NEEDED;
+  const progress = Math.min(stableCount / stableFramesNeeded, 1);
+  const isStable = stableCount >= stableFramesNeeded;
 
   boxes.forEach((b) => {
     const sx = offsetX + b.x * scale;
@@ -74,16 +96,15 @@ function drawBoxesOnCanvas(
     const sh = b.h * scale;
 
     ctx.strokeStyle = isStable ? '#22c55e' : `rgba(34,197,94,${0.45 + progress * 0.55})`;
-    ctx.lineWidth   = isStable ? 3 : 2;
+    ctx.lineWidth = isStable ? 3 : 2;
     ctx.strokeRect(sx, sy, sw, sh);
 
     const label = `${(b.confidence * 100).toFixed(0)}%`;
-    ctx.font      = 'bold 11px monospace';
+    ctx.font = 'bold 11px monospace';
     ctx.fillStyle = ctx.strokeStyle;
     ctx.fillText(label, sx + 2, sy > 14 ? sy - 3 : sy + sh + 12);
   });
 
-  // Barra de progresso no topo
   if (stableCount > 0) {
     const barH = 4;
     ctx.fillStyle = 'rgba(34,197,94,0.3)';
@@ -93,11 +114,12 @@ function drawBoxesOnCanvas(
   }
 }
 
-// ─── Extrai blob do frame atual do <video> ────────────────────────────────────
-function snapVideoFrame(video: HTMLVideoElement): Promise<{ blob: Blob; canvas: HTMLCanvasElement }> {
+function snapVideoFrame(
+  video: HTMLVideoElement,
+): Promise<{ blob: Blob; canvas: HTMLCanvasElement }> {
   return new Promise((resolve, reject) => {
     const c = document.createElement('canvas');
-    c.width  = video.videoWidth;
+    c.width = video.videoWidth;
     c.height = video.videoHeight;
     c.getContext('2d')!.drawImage(video, 0, 0);
     c.toBlob(
@@ -117,35 +139,68 @@ export function useRealtimeScanner({
   scanFn,
   targetCharCount,
   inferenceIntervalMs = DEFAULT_INFERENCE_INTERVAL_MS,
+  stableFramesNeeded = STABLE_FRAMES_NEEDED,
 }: UseRealtimeScannerOptions): RealtimeScannerControls {
-
-  const rafRef          = useRef<number | null>(null);
-  const inferringRef    = useRef(false);
-  const lockedRef       = useRef(false);
+  const rafRef = useRef<number | null>(null);
+  const inferringRef = useRef(false);
+  const lockedRef = useRef(false);
   const lastInferenceTs = useRef(0);
-  const stableCountRef  = useRef(0);
-  const lastBoxesRef    = useRef<YOLOBox[]>([]);   // última detecção — usada pelo captureNow
+  const stableCountRef = useRef(0);
+  const lastPreviewTextRef = useRef<string | undefined>(undefined);
 
-  // Estabiliza callbacks via refs (evita re-criação do loop)
-  const onAutoCaptureRef      = useRef(onAutoCapture);
-  const scanFnRef             = useRef(scanFn);
-  const targetCountRef        = useRef(targetCharCount);
-  const inferenceIntervalRef  = useRef(inferenceIntervalMs);
-  useEffect(() => { onAutoCaptureRef.current = onAutoCapture; },       [onAutoCapture]);
-  useEffect(() => { scanFnRef.current = scanFn; },                     [scanFn]);
-  useEffect(() => { targetCountRef.current = targetCharCount; },       [targetCharCount]);
+  const onAutoCaptureRef = useRef(onAutoCapture);
+  const scanFnRef = useRef(scanFn);
+  const targetCountRef = useRef(targetCharCount);
+  const inferenceIntervalRef = useRef(inferenceIntervalMs);
+  const stableFramesRef = useRef(stableFramesNeeded);
+
+  useEffect(() => { onAutoCaptureRef.current = onAutoCapture; }, [onAutoCapture]);
+  useEffect(() => { scanFnRef.current = scanFn; }, [scanFn]);
+  useEffect(() => { targetCountRef.current = targetCharCount; }, [targetCharCount]);
   useEffect(() => { inferenceIntervalRef.current = inferenceIntervalMs; }, [inferenceIntervalMs]);
+  useEffect(() => { stableFramesRef.current = stableFramesNeeded; }, [stableFramesNeeded]);
 
   const [state, setState] = useState<RealtimeScannerState>({
-    boxes: [], stableCount: 0, isLocked: false,
+    boxes: [],
+    stableCount: 0,
+    isLocked: false,
   });
 
-  // ── Passo de inferência (async, throttled pelo loop RAF) ──────────────────
+  const updateStability = useCallback((result: RealtimeScanFrameResult): number => {
+    const ready =
+      result.ready ??
+      result.boxes.length === targetCountRef.current;
+
+    if (!ready) {
+      stableCountRef.current = 0;
+      lastPreviewTextRef.current = undefined;
+      return 0;
+    }
+
+    if (
+      result.previewText != null &&
+      lastPreviewTextRef.current != null &&
+      result.previewText !== lastPreviewTextRef.current
+    ) {
+      stableCountRef.current = 1;
+      lastPreviewTextRef.current = result.previewText;
+      return 1;
+    }
+
+    stableCountRef.current = Math.min(
+      stableCountRef.current + 1,
+      stableFramesRef.current + 1,
+    );
+    if (result.previewText) {
+      lastPreviewTextRef.current = result.previewText;
+    }
+    return stableCountRef.current;
+  }, []);
+
   const runInferenceStep = useCallback(async () => {
     const video = videoRef.current;
     if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
-    // Snapshot do frame para canvas reutilizado na detecção E na captura
     let frameBlob: Blob;
     let frameCanvas: HTMLCanvasElement;
     try {
@@ -154,56 +209,66 @@ export function useRealtimeScanner({
       return;
     }
 
-    // Detecção YOLO
-    let boxes: YOLOBox[] = [];
+    let result: RealtimeScanFrameResult;
     try {
-      boxes = await scanFnRef.current(frameCanvas);
+      result = normalizeScanResult(await scanFnRef.current(frameCanvas));
     } catch {
-      return; // frame descartado silenciosamente
+      return;
     }
 
-    lastBoxesRef.current = boxes;
+    const stableCount = updateStability(result);
 
-    // Overlay visual
     const overlay = overlayCanvasRef.current;
     if (overlay) {
-      overlay.width  = video.videoWidth;
+      overlay.width = video.videoWidth;
       overlay.height = video.videoHeight;
-      drawBoxesOnCanvas(overlay, boxes, video.videoWidth, video.videoHeight, stableCountRef.current);
+      drawBoxesOnCanvas(
+        overlay,
+        result.boxes,
+        video.videoWidth,
+        video.videoHeight,
+        stableCount,
+        stableFramesRef.current,
+      );
     }
 
-    // Heurística de estabilidade
-    if (boxes.length === targetCountRef.current) {
-      stableCountRef.current = Math.min(stableCountRef.current + 1, STABLE_FRAMES_NEEDED + 1);
-    } else {
-      stableCountRef.current = 0;
-    }
+    setState({
+      boxes: result.boxes,
+      stableCount,
+      isLocked: false,
+      previewText: result.previewText,
+      previewConfidence: result.previewConfidence,
+    });
 
-    setState({ boxes, stableCount: stableCountRef.current, isLocked: false });
-
-    // ── Auto-disparo quando estável ────────────────────────────────────────
-    if (stableCountRef.current >= STABLE_FRAMES_NEEDED) {
+    if (stableCount >= stableFramesRef.current) {
       lockedRef.current = true;
-      setState(s => ({ ...s, isLocked: true }));
+      setState((s) => ({ ...s, isLocked: true }));
       if ('vibrate' in navigator) navigator.vibrate(200);
-      onAutoCaptureRef.current({ originalImageBlob: frameBlob, yoloData: boxes });
+      onAutoCaptureRef.current({
+        originalImageBlob: frameBlob,
+        yoloData: result.boxes,
+        previewText: result.previewText,
+        previewConfidence: result.previewConfidence,
+      });
     }
-  }, [videoRef, overlayCanvasRef]);
+  }, [videoRef, overlayCanvasRef, updateStability]);
 
-  // ── Loop RAF — vídeo roda a 30/60 fps; YOLO é throttled ──────────────────
   const loop = useCallback(() => {
     if (lockedRef.current) return;
     rafRef.current = requestAnimationFrame(loop);
 
     const now = performance.now();
-    if (inferringRef.current || now - lastInferenceTs.current < inferenceIntervalRef.current) return;
+    if (inferringRef.current || now - lastInferenceTs.current < inferenceIntervalRef.current) {
+      return;
+    }
 
     lastInferenceTs.current = now;
-    inferringRef.current    = true;
-    runInferenceStep().finally(() => { inferringRef.current = false; });
+    inferringRef.current = true;
+    runInferenceStep().finally(() => {
+      inferringRef.current = false;
+    });
   }, [runInferenceStep]);
 
-  // ── Captura manual imediata ───────────────────────────────────────────────
   const captureNow = useCallback(() => {
     if (lockedRef.current) return;
     lockedRef.current = true;
@@ -214,22 +279,38 @@ export function useRealtimeScanner({
     if ('vibrate' in navigator) navigator.vibrate(100);
 
     snapVideoFrame(video)
-      .then(({ blob }) => {
-        setState(s => ({ ...s, isLocked: true }));
-        onAutoCaptureRef.current({ originalImageBlob: blob, yoloData: lastBoxesRef.current });
+      .then(async ({ blob, canvas }) => {
+        let result: RealtimeScanFrameResult = { boxes: [] };
+        try {
+          result = normalizeScanResult(await scanFnRef.current(canvas));
+        } catch {
+          /* manual: envia foto mesmo se scan falhar */
+        }
+        setState((s) => ({
+          ...s,
+          isLocked: true,
+          boxes: result.boxes,
+          previewText: result.previewText,
+          previewConfidence: result.previewConfidence,
+        }));
+        onAutoCaptureRef.current({
+          originalImageBlob: blob,
+          yoloData: result.boxes,
+          previewText: result.previewText,
+          previewConfidence: result.previewConfidence,
+        });
       })
       .catch(console.error);
   }, [videoRef]);
 
-  // ── Ciclo de vida ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!enabled) return;
 
-    stableCountRef.current  = 0;
-    lockedRef.current       = false;
+    stableCountRef.current = 0;
+    lockedRef.current = false;
     lastInferenceTs.current = 0;
-    inferringRef.current    = false;
-    lastBoxesRef.current    = [];
+    inferringRef.current = false;
+    lastPreviewTextRef.current = undefined;
     setState({ boxes: [], stableCount: 0, isLocked: false });
 
     rafRef.current = requestAnimationFrame(loop);
@@ -240,7 +321,8 @@ export function useRealtimeScanner({
         rafRef.current = null;
       }
       overlayCanvasRef.current?.getContext('2d')?.clearRect(
-        0, 0,
+        0,
+        0,
         overlayCanvasRef.current.width,
         overlayCanvasRef.current.height,
       );
