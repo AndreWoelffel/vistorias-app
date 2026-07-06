@@ -251,7 +251,6 @@ export function useRealtimeScanner({
     if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
     const perfPlate = import.meta.env.DEV && squareCropRef.current;
-    if (perfPlate) beginPlatePreviewFrame();
 
     const drawStart = perfPlate ? performance.now() : 0;
     const frameCanvas = snapVideoFrameToCanvas(
@@ -262,11 +261,14 @@ export function useRealtimeScanner({
     if (!frameCanvas) return;
     frameCanvasScratchRef.current = frameCanvas;
 
+    if (perfPlate) beginPlatePreviewFrame(getActiveTfBackend());
+
     if (perfPlate) {
-      patchPlatePreviewFrame({
-        drawImageMs: performance.now() - drawStart,
-        tfBackend: getActiveTfBackend(),
-      });
+      const drawImageMs = performance.now() - drawStart;
+      patchPlatePreviewFrame({ drawImageMs, tfBackend: getActiveTfBackend() });
+      if (drawImageMs >= 16) {
+        patchPlatePreviewFrame({ longTasks: [{ label: 'drawImage', ms: drawImageMs }] });
+      }
     }
 
     let result: RealtimeScanFrameResult;
@@ -299,7 +301,11 @@ export function useRealtimeScanner({
       );
     }
     if (perfPlate) {
-      patchPlatePreviewFrame({ overlayMs: performance.now() - overlayStart });
+      const overlayMs = performance.now() - overlayStart;
+      patchPlatePreviewFrame({ overlayMs });
+      if (overlayMs >= 16) {
+        patchPlatePreviewFrame({ longTasks: [{ label: 'overlay', ms: overlayMs }] });
+      }
     }
 
     const reactStart = perfPlate ? performance.now() : 0;
@@ -321,7 +327,11 @@ export function useRealtimeScanner({
       };
     });
     if (perfPlate) {
-      endPlatePreviewFrame({ reactSetStateMs: performance.now() - reactStart });
+      const reactSetStateMs = performance.now() - reactStart;
+      if (reactSetStateMs >= 16) {
+        patchPlatePreviewFrame({ longTasks: [{ label: 'react.setState', ms: reactSetStateMs }] });
+      }
+      endPlatePreviewFrame({ reactSetStateMs });
     }
 
     if (stableCount >= stableFramesRef.current) {
