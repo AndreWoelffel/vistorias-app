@@ -4,10 +4,17 @@
  * Número da vistoria: pré-processamento + Tesseract (fallback)
  */
 
-import * as tf from '@tensorflow/tfjs';
+import { alprDevLog } from '@/lib/alprDevLog';
+import {
+  markReusedPreviewResult,
+  recordLastPreviewFrame,
+  recordPostCaptureCnn,
+  recordPostCaptureYolo,
+} from '@/lib/plateOcrPerf';
 // Backend super-rápido para CPU caso o celular não suporte WebGL (Placa de vídeo)
 import '@tensorflow/tfjs-backend-wasm';
 import { setWasmPaths } from '@tensorflow/tfjs-backend-wasm';
+import * as tf from '@tensorflow/tfjs';
 
 const CHAR_CLASSES = [
   '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -229,7 +236,7 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     }
   }
 
-  console.log(`[YOLO DEBUG 1] Caixas brutas totais (Conf > 0.08): ${rawBoxes.length}`);
+  alprDevLog(`[YOLO DEBUG 1] Caixas brutas totais (Conf > 0.08): ${rawBoxes.length}`);
 
   // 1. Identificação dinâmica de classes ANTES do NMS (Roboflow pode inverter IDs).
   const rawC0 = rawBoxes.filter(b => b.classIndex === 0);
@@ -239,7 +246,7 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
   const charClassId = meanArea(rawC0) <= meanArea(rawC1) ? 0 : 1;
   const plateClassId = charClassId === 0 ? 1 : 0;
 
-  console.log(`[YOLO DEBUG 2] Classe do Adesivo: ${plateClassId} | Classe do Caractere: ${charClassId}`);
+  alprDevLog(`[YOLO DEBUG 2] Classe do Adesivo: ${plateClassId} | Classe do Caractere: ${charClassId}`);
 
   // 2. NMS — distância entre centros para caracteres; IoU para o adesivo
   rawBoxes.sort((a, b) => b.confidence - a.confidence);
@@ -269,13 +276,13 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     if (!isDuplicate) filtered.push(box);
   }
 
-  console.log(`[YOLO DEBUG 3] Sobreviveram à tesoura do NMS: ${filtered.length} caixas totais`);
+  alprDevLog(`[YOLO DEBUG 3] Sobreviveram à tesoura do NMS: ${filtered.length} caixas totais`);
 
   // 3. Atribuição final pós-NMS
   let plateBoxes = filtered.filter(b => b.classIndex === plateClassId);
   let charBoxes = filtered.filter(b => b.classIndex === charClassId);
 
-  console.log(`[YOLO DEBUG 4] Adesivos separados: ${plateBoxes.length} | Caracteres separados: ${charBoxes.length}`);
+  alprDevLog(`[YOLO DEBUG 4] Adesivos separados: ${plateBoxes.length} | Caracteres separados: ${charBoxes.length}`);
 
   if (plateBoxes.length > 0) {
     const mainPlate = plateBoxes[0];
@@ -293,7 +300,7 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     });
   }
 
-  console.log(`[YOLO DEBUG 5] Caracteres válidos (DENTRO do adesivo): ${charBoxes.length}`);
+  alprDevLog(`[YOLO DEBUG 5] Caracteres válidos (DENTRO do adesivo): ${charBoxes.length}`);
 
   charBoxes.sort((a, b) => {
     const yDiff = a.y - b.y;
@@ -508,6 +515,101 @@ async function predictCharWithCNN(
   return { char: idx >= 0 ? char : '?', confidence };
 }
 
+type PlateCharClassification = {
+  plateText: string;
+  avgConfidence: number;
+  charConfidences: number[];
+  charResults: { char: string; confidence: number }[];
+  charDebugImages: string[];
+};
+
+function sortPlateCharBoxes(boxes: YOLOBox[]): YOLOBox[] {
+  return boxes
+    .slice(0, PLATE_CAPTURE_THRESHOLDS.targetCharCount)
+    .sort((a, b) => a.x - b.x);
+}
+
+function buildPlateTextFromCharResults(
+  charResults: { char: string; confidence: number }[],
+): Pick<PlateCharClassification, 'plateText' | 'avgConfidence' | 'charConfidences'> {
+  let plateText = charResults.map((r) => r.char).join('');
+  const charConfidences = charResults.map((r) => r.confidence);
+  const avgConfidence =
+    charConfidences.length > 0
+      ? charConfidences.reduce((s, c) => s + c, 0) / charConfidences.length
+      : 0;
+
+  if (plateText.length >= PLATE_CAPTURE_THRESHOLDS.targetCharCount) {
+    plateText = applyMercosulMask(plateText);
+  }
+
+  return { plateText, avgConfidence, charConfidences };
+}
+
+async function classifyPlateCharsFromImageData(
+  imageData: Uint8ClampedArray,
+  origW: number,
+  origH: number,
+  boxes: YOLOBox[],
+  options?: { collectDebugImages?: boolean; perfContext?: 'preview' | 'post' },
+): Promise<PlateCharClassification> {
+  const cnn = await loadCNNModel();
+  const empty: PlateCharClassification = {
+    plateText: '',
+    avgConfidence: 0,
+    charConfidences: [],
+    charResults: [],
+    charDebugImages: [],
+  };
+  if (!cnn || boxes.length === 0) return empty;
+
+  const sorted = sortPlateCharBoxes(boxes);
+  const collectDebug = options?.collectDebugImages ?? false;
+  const perfContext = options?.perfContext;
+  const cnnStart = perfContext ? performance.now() : 0;
+
+  const charResults: { char: string; confidence: number }[] = [];
+  const charDebugImages: string[] = [];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const { tensor, debugUrl } = cropAndPrepareForCNN(imageData, origW, origH, sorted[i]);
+    if (collectDebug) charDebugImages.push(debugUrl);
+    charResults.push(await predictCharWithCNN(cnn, tensor, i));
+  }
+
+  if (perfContext === 'post') {
+    recordPostCaptureCnn(charResults.length, performance.now() - cnnStart);
+  }
+
+  const { plateText, avgConfidence, charConfidences } = buildPlateTextFromCharResults(charResults);
+
+  if (import.meta.env.DEV && perfContext === 'post') {
+    alprDevLog('=========================================');
+    alprDevLog(`[ALPR DEBUG] PLACA BRUTA LIDA: ${plateText}`);
+    charResults.forEach((r, idx) => {
+      alprDevLog(`Posição ${idx + 1}: ${r.char} (Confiança: ${r.confidence.toFixed(2)}%)`);
+    });
+    alprDevLog('=========================================');
+  }
+
+  return { plateText, avgConfidence, charConfidences, charResults, charDebugImages };
+}
+
+function buildPlateDebugOverlay(
+  imageDataObj: ImageData,
+  boxes: YOLOBox[],
+): string {
+  const debugOut = document.createElement('canvas');
+  debugOut.width = imageDataObj.width;
+  debugOut.height = imageDataObj.height;
+  const dctx = debugOut.getContext('2d')!;
+  dctx.putImageData(imageDataObj, 0, 0);
+  dctx.strokeStyle = 'lime';
+  dctx.lineWidth = 2;
+  sortPlateCharBoxes(boxes).forEach((b) => dctx.strokeRect(b.x, b.y, b.w, b.h));
+  return debugOut.toDataURL('image/png');
+}
+
 export async function runPlatePipelineYOLO(
   blob: Blob
 ): Promise<{ text: string; confidence: number; debugImage?: string; charDebugImages?: string[] } | null> {
@@ -533,6 +635,7 @@ export async function runPlatePipelineYOLO(
 
   ctx.drawImage(img, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
 
+  const yoloStart = import.meta.env.DEV ? performance.now() : 0;
   const inputTensor = tf.browser.fromPixels(canvas, 3).expandDims(0).toFloat().div(255.0) as unknown as tf.Tensor4D;
   const output = yolo.predict(inputTensor) as tf.Tensor;
   const rawOut = Array.isArray(output) ? output[0] : output;
@@ -541,6 +644,10 @@ export async function runPlatePipelineYOLO(
   if (Array.isArray(output)) output.forEach(t => t.dispose());
   else output.dispose();
   inputTensor.dispose();
+
+  if (import.meta.env.DEV) {
+    recordPostCaptureYolo(performance.now() - yoloStart);
+  }
 
   if (boxes.length === 0) {
     if (typeof img.close === 'function') img.close();
@@ -552,59 +659,33 @@ export async function runPlatePipelineYOLO(
   srcCanvas.height = origH;
   srcCanvas.getContext('2d')!.drawImage(img, 0, 0);
   const imageDataObj = srcCanvas.getContext('2d')!.getImageData(0, 0, origW, origH);
-  const imageData = imageDataObj.data;
   if (typeof img.close === 'function') img.close();
 
-  const toProcess = boxes.slice(0, 7);
-  const charResults: { char: string; confidence: number }[] = [];
-  const charDebugImages: string[] = [];
-
-  for (let i = 0; i < toProcess.length; i++) {
-    const box = toProcess[i];
-    const { tensor, debugUrl } = cropAndPrepareForCNN(imageData, origW, origH, box);
-    charDebugImages.push(debugUrl);
-
-    const result = await predictCharWithCNN(cnn, tensor, i);
-    charResults.push(result);
-  }
-
-  // --- MÁGICA DO ARQUITETO: O Raio-X da CNN ---
-  const rawPlaca = charResults.map((r) => r.char).join('');
-  console.log('=========================================');
-  console.log(`[ALPR DEBUG] PLACA BRUTA LIDA: ${rawPlaca}`);
-  charResults.forEach((r, idx) => {
-    console.log(`Posição ${idx + 1}: ${r.char} (Confiança: ${r.confidence.toFixed(2)}%)`);
-  });
-  console.log('=========================================');
-  // ---------------------------------------------
-
-  let plateText = charResults.map((r) => r.char).join('');
-  const avgConf =
-    charResults.length > 0
-      ? charResults.reduce((s, r) => s + r.confidence, 0) / charResults.length
-      : 0;
-
-  if (plateText.length >= 7) {
-    plateText = applyMercosulMask(plateText);
-  }
-
-  const debugOut = document.createElement('canvas');
-  debugOut.width = origW;
-  debugOut.height = origH;
-  const dctx = debugOut.getContext('2d')!;
-  dctx.putImageData(imageDataObj, 0, 0);
-  dctx.strokeStyle = 'lime';
-  dctx.lineWidth = 2;
-  toProcess.forEach((b) => dctx.strokeRect(b.x, b.y, b.w, b.h));
-  const debugImage = debugOut.toDataURL('image/png');
+  const classified = await classifyPlateCharsFromImageData(
+    imageDataObj.data,
+    origW,
+    origH,
+    boxes,
+    { collectDebugImages: true, perfContext: 'post' },
+  );
 
   return {
-    text: plateText,
-    confidence: avgConf,
-    debugImage,
-    charDebugImages,
+    text: classified.plateText,
+    confidence: classified.avgConfidence,
+    debugImage: buildPlateDebugOverlay(imageDataObj, boxes),
+    charDebugImages: classified.charDebugImages,
   };
 }
+
+export type PrecomputedPlateOcr = {
+  text: string;
+  confidence: number;
+};
+
+export type OcrWithVotingOptions = {
+  /** Resultado já validado no preview realtime — evita reexecutar YOLO+CNN. */
+  precomputedPlate?: PrecomputedPlateOcr;
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Pipeline de Adesivo (YOLO 2-classes + Tesseract PSM 10 por dígito)
@@ -699,14 +780,12 @@ export async function runStickerPipelineYOLO(
     ? confidences.reduce((s, c) => s + c, 0) / confidences.length
     : 0;
 
-  if (import.meta.env.DEV) {
-    console.log('[STICKER YOLO] =========================================');
-    console.log(`[STICKER YOLO] NÚMERO LIDO: "${text}" | Conf: ${avgConf.toFixed(1)}%`);
-    charResults.forEach((r, i) =>
-      console.log(`  Dígito ${i + 1}: "${r.char}" (${r.confidence.toFixed(1)}%)`)
-    );
-    console.log('[STICKER YOLO] =========================================');
-  }
+  alprDevLog('[STICKER YOLO] =========================================');
+  alprDevLog(`[STICKER YOLO] NÚMERO LIDO: "${text}" | Conf: ${avgConf.toFixed(1)}%`);
+  charResults.forEach((r, i) =>
+    alprDevLog(`  Dígito ${i + 1}: "${r.char}" (${r.confidence.toFixed(1)}%)`),
+  );
+  alprDevLog('[STICKER YOLO] =========================================');
 
   // ── 6. Debug overlay com bounding boxes verdes ───────────────────────────
   const debugOut = document.createElement('canvas');
@@ -930,38 +1009,20 @@ async function classifyPlateCharsOnFrame(
   frameCanvas: HTMLCanvasElement,
   boxes: YOLOBox[],
 ): Promise<{ plateText: string; avgConfidence: number; charConfidences: number[] }> {
-  const cnn = await loadCNNModel();
-  if (!cnn || boxes.length === 0) {
-    return { plateText: '', avgConfidence: 0, charConfidences: [] };
-  }
-
   const origW = frameCanvas.width;
   const origH = frameCanvas.height;
   const imageDataObj = frameCanvas.getContext('2d')!.getImageData(0, 0, origW, origH);
-  const imageData = imageDataObj.data;
-
-  const sorted = boxes
-    .slice(0, PLATE_CAPTURE_THRESHOLDS.targetCharCount)
-    .sort((a, b) => a.x - b.x);
-
-  const charResults: { char: string; confidence: number }[] = [];
-  for (let i = 0; i < sorted.length; i++) {
-    const { tensor } = cropAndPrepareForCNN(imageData, origW, origH, sorted[i]);
-    charResults.push(await predictCharWithCNN(cnn, tensor, i));
-  }
-
-  let plateText = charResults.map((r) => r.char).join('');
-  const charConfidences = charResults.map((r) => r.confidence);
-  const avgConfidence =
-    charConfidences.length > 0
-      ? charConfidences.reduce((s, c) => s + c, 0) / charConfidences.length
-      : 0;
-
-  if (plateText.length >= PLATE_CAPTURE_THRESHOLDS.targetCharCount) {
-    plateText = applyMercosulMask(plateText);
-  }
-
-  return { plateText, avgConfidence, charConfidences };
+  const classified = await classifyPlateCharsFromImageData(
+    imageDataObj.data,
+    origW,
+    origH,
+    boxes,
+  );
+  return {
+    plateText: classified.plateText,
+    avgConfidence: classified.avgConfidence,
+    charConfidences: classified.charConfidences,
+  };
 }
 
 /**
@@ -971,7 +1032,10 @@ async function classifyPlateCharsOnFrame(
 export async function scanFrameForPlateWithCNN(
   frameCanvas: HTMLCanvasElement,
 ): Promise<PlateFrameScanResult> {
+  const yoloStart = import.meta.env.DEV ? performance.now() : 0;
   const boxes = await detectPlateCharBoxesOnCanvas(frameCanvas);
+  const yoloMs = import.meta.env.DEV ? performance.now() - yoloStart : 0;
+
   const empty: PlateFrameScanResult = {
     boxes,
     plateText: '',
@@ -996,10 +1060,15 @@ export async function scanFrameForPlateWithCNN(
   const maxY = Math.min(origH, Math.max(...boxes.map((b) => b.y + b.h)) + pad);
   const sharpness = measureRegionSharpness(imageData, origW, origH, minX, minY, maxX, maxY);
 
+  const cnnStart = import.meta.env.DEV ? performance.now() : 0;
   const { plateText, avgConfidence, charConfidences } = await classifyPlateCharsOnFrame(
     frameCanvas,
     boxes,
   );
+  const cnnMs = import.meta.env.DEV ? performance.now() - cnnStart : 0;
+  if (import.meta.env.DEV) {
+    recordLastPreviewFrame(yoloMs, cnnMs);
+  }
 
   const { passes, reason } = evaluatePlateCaptureGate(
     charConfidences,
@@ -1546,10 +1615,20 @@ export async function ocrWithVoting(
   blob: Blob,
   cropType: 'plate' | 'number',
   createWorkerFn: () => Promise<any>,
-  whitelist: string
+  whitelist: string,
+  options?: OcrWithVotingOptions,
 ): Promise<{ text: string; confidence: number; corrections?: string[]; debugImage?: string; charDebugImages?: string[] }> {
   if (cropType === 'plate') {
     try {
+      if (options?.precomputedPlate) {
+        markReusedPreviewResult();
+        return {
+          text: options.precomputedPlate.text,
+          confidence: options.precomputedPlate.confidence,
+          corrections: [],
+        };
+      }
+
       const yolo = await loadYOLOModel();
       const cnn = await loadCNNModel();
       if (!yolo || !cnn) return { text: '', confidence: 0 };

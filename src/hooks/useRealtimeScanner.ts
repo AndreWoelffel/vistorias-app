@@ -12,6 +12,8 @@ export interface ScanCapture {
   /** Placa lida no frame capturado (modo placa com gate CNN) */
   previewText?: string;
   previewConfidence?: number;
+  /** true somente no auto-disparo com gate aprovado — habilita reuso do preview no OCR */
+  gateApproved?: boolean;
 }
 
 export interface RealtimeScanFrameResult {
@@ -276,6 +278,7 @@ export function useRealtimeScanner({
         yoloData: result.boxes,
         previewText: result.previewText,
         previewConfidence: result.previewConfidence,
+        gateApproved: true,
       });
     }
   }, [videoRef, overlayCanvasRef, updateStability]);

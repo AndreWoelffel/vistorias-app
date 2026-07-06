@@ -20,7 +20,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
-import { RealtimeScannerCamera } from '@/components/RealtimeScannerCamera';
+import { RealtimeScannerCamera, type ScanCapture } from '@/components/RealtimeScannerCamera';
 import { addVistoria } from '@/hooks/useVistorias';
 import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync, updateVistoria } from '@/lib/db';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
@@ -49,6 +49,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { processarPlaca } from '@/lib/plateValidator';
+import { beginPlateCapturePerf, logPlateCapturePerf } from '@/lib/plateOcrPerf';
 
 type Step = 'placa' | 'numero' | 'fotos' | 'saving';
 type CameraMode = 'placa' | 'numero' | 'chassi' | 'motor' | 'geral' | null;
@@ -139,7 +140,15 @@ export default function NewInspection() {
   // PROCESSAMENTO DE IA (OCR / YOLO)
   // ════════════════════════════════════════════════════════════════════════
 
-  const runOCR = useCallback(async (blob: Blob, type: 'placa' | 'numero') => {
+  const runOCR = useCallback(async (
+    blob: Blob,
+    type: 'placa' | 'numero',
+    opts?: { precomputedPlate?: { text: string; confidence: number }; perfLabel?: string },
+  ) => {
+    if (type === 'placa') {
+      beginPlateCapturePerf();
+    }
+
     setOcrLoading(true);
     setOcrConfidence(null);
     setDebugImage(null);
@@ -153,7 +162,8 @@ export default function NewInspection() {
         blob,
         cropType,
         () => createWorker('por'),
-        whitelist
+        whitelist,
+        opts?.precomputedPlate ? { precomputedPlate: opts.precomputedPlate } : undefined,
       );
 
       // Salva o blob original para a contagem no Resumo e envio para nuvem
@@ -183,6 +193,7 @@ export default function NewInspection() {
         setPlacaOriginalIA(finalPlate);
         const warning = detectOQAmbiguity(finalPlate);
         if (warning) setOqWarning(warning);
+        logPlateCapturePerf(opts?.perfLabel ?? 'placa');
       } else {
         const match = rawText.match(/\d{5}/);
         setNumero(match ? match[0] : rawText.slice(0, 5));
@@ -295,11 +306,26 @@ export default function NewInspection() {
   // ROTEAMENTO DE CÂMERA E CAPTURA
   // ════════════════════════════════════════════════════════════════════════
 
+  const handlePlateScanCapture = useCallback((capture: ScanCapture) => {
+    setCameraMode(null);
+    const reusePreview =
+      capture.gateApproved === true &&
+      !!capture.previewText &&
+      capture.previewConfidence != null;
+
+    runOCR(capture.originalImageBlob, 'placa', reusePreview
+      ? {
+          precomputedPlate: {
+            text: capture.previewText!,
+            confidence: capture.previewConfidence!,
+          },
+          perfLabel: 'auto-capture',
+        }
+      : { perfLabel: 'manual-capture' });
+  }, [runOCR]);
+
   const handleCapture = async (blob: Blob) => {
-    if (cameraMode === 'placa') {
-      setCameraMode(null);
-      runOCR(blob, 'placa');
-    } else if (cameraMode === 'numero') {
+    if (cameraMode === 'numero') {
       handleStickerCapture(blob);
     } else if (cameraMode === 'chassi') {
       setCameraMode(null);
@@ -571,10 +597,7 @@ export default function NewInspection() {
       return (
         <RealtimeScannerCamera
           mode="plate"
-          onCapture={({ originalImageBlob }) => {
-            setCameraMode(null);
-            runOCR(originalImageBlob, 'placa');
-          }}
+          onCapture={handlePlateScanCapture}
           onCancel={() => setCameraMode(null)}
         />
       );
