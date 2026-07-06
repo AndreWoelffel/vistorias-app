@@ -821,7 +821,7 @@ export async function scanFrameForPlate(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export const PLATE_CAPTURE_THRESHOLDS = {
-  minCharConfidence: 95,
+  minCharConfidence: 80,
   minAvgConfidence: 80,
   minSharpness: 45,
   targetCharCount: 7,
