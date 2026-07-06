@@ -1,5 +1,11 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
-import { type YOLOBox, resetPlatePreviewCache } from '@/lib/imageUtils';
+import { type YOLOBox, resetPlatePreviewCache, getActiveTfBackend } from '@/lib/imageUtils';
+import {
+  beginPlatePreviewFrame,
+  endPlatePreviewFrame,
+  patchPlatePreviewFrame,
+  resetPlatePreviewPerf,
+} from '@/lib/platePreviewPerf';
 
 // ─── Tipos públicos ───────────────────────────────────────────────────────────
 
@@ -121,10 +127,11 @@ function drawBoxesOnCanvas(
 function snapVideoFrameToCanvas(
   video: HTMLVideoElement,
   squareCenterCrop = false,
+  reuseCanvas?: HTMLCanvasElement | null,
 ): HTMLCanvasElement | null {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
-  const c = document.createElement('canvas');
+  const c = reuseCanvas ?? document.createElement('canvas');
   const ctx = c.getContext('2d');
   if (!ctx || vw === 0 || vh === 0) return null;
 
@@ -132,12 +139,16 @@ function snapVideoFrameToCanvas(
     const cropSize = Math.min(vw, vh);
     const startX = (vw - cropSize) / 2;
     const startY = (vh - cropSize) / 2;
-    c.width = cropSize;
-    c.height = cropSize;
+    if (c.width !== cropSize || c.height !== cropSize) {
+      c.width = cropSize;
+      c.height = cropSize;
+    }
     ctx.drawImage(video, startX, startY, cropSize, cropSize, 0, 0, cropSize, cropSize);
   } else {
-    c.width = vw;
-    c.height = vh;
+    if (c.width !== vw || c.height !== vh) {
+      c.width = vw;
+      c.height = vh;
+    }
     ctx.drawImage(video, 0, 0);
   }
 
@@ -188,6 +199,8 @@ export function useRealtimeScanner({
   const inferenceIntervalRef = useRef(inferenceIntervalMs);
   const stableFramesRef = useRef(stableFramesNeeded);
   const squareCropRef = useRef(squareCenterCrop);
+  const frameCanvasScratchRef = useRef<HTMLCanvasElement | null>(null);
+  const overlaySizeRef = useRef({ w: 0, h: 0 });
 
   useEffect(() => { onAutoCaptureRef.current = onAutoCapture; }, [onAutoCapture]);
   useEffect(() => { scanFnRef.current = scanFn; }, [scanFn]);
@@ -237,32 +250,59 @@ export function useRealtimeScanner({
     const video = videoRef.current;
     if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
-    const frameCanvas = snapVideoFrameToCanvas(video, squareCropRef.current);
+    const perfPlate = import.meta.env.DEV && squareCropRef.current;
+    if (perfPlate) beginPlatePreviewFrame();
+
+    const drawStart = perfPlate ? performance.now() : 0;
+    const frameCanvas = snapVideoFrameToCanvas(
+      video,
+      squareCropRef.current,
+      frameCanvasScratchRef.current,
+    );
     if (!frameCanvas) return;
+    frameCanvasScratchRef.current = frameCanvas;
+
+    if (perfPlate) {
+      patchPlatePreviewFrame({
+        drawImageMs: performance.now() - drawStart,
+        tfBackend: getActiveTfBackend(),
+      });
+    }
 
     let result: RealtimeScanFrameResult;
     try {
       result = normalizeScanResult(await scanFnRef.current(frameCanvas));
     } catch {
+      if (perfPlate) endPlatePreviewFrame();
       return;
     }
 
     const stableCount = updateStability(result);
 
     const overlay = overlayCanvasRef.current;
+    const overlayStart = perfPlate ? performance.now() : 0;
     if (overlay) {
-      overlay.width = video.videoWidth;
-      overlay.height = video.videoHeight;
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (overlaySizeRef.current.w !== vw || overlaySizeRef.current.h !== vh) {
+        overlay.width = vw;
+        overlay.height = vh;
+        overlaySizeRef.current = { w: vw, h: vh };
+      }
       drawBoxesOnCanvas(
         overlay,
         result.boxes,
-        video.videoWidth,
-        video.videoHeight,
+        vw,
+        vh,
         stableCount,
         stableFramesRef.current,
       );
     }
+    if (perfPlate) {
+      patchPlatePreviewFrame({ overlayMs: performance.now() - overlayStart });
+    }
 
+    const reactStart = perfPlate ? performance.now() : 0;
     setState((prev) => {
       if (
         prev.stableCount === stableCount &&
@@ -280,6 +320,9 @@ export function useRealtimeScanner({
         previewConfidence: result.previewConfidence,
       };
     });
+    if (perfPlate) {
+      endPlatePreviewFrame({ reactSetStateMs: performance.now() - reactStart });
+    }
 
     if (stableCount >= stableFramesRef.current) {
       lockedRef.current = true;
@@ -361,6 +404,9 @@ export function useRealtimeScanner({
     inferringRef.current = false;
     lastPreviewTextRef.current = undefined;
     resetPlatePreviewCache();
+    resetPlatePreviewPerf();
+    frameCanvasScratchRef.current = null;
+    overlaySizeRef.current = { w: 0, h: 0 };
     setState({ boxes: [], stableCount: 0, isLocked: false });
 
     rafRef.current = requestAnimationFrame(loop);

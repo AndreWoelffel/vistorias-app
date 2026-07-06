@@ -338,25 +338,30 @@ export function CameraCapture({
         {!capturedFinal ? (
           continuousMode ? (
             <>
-              <Button variant="secondary" className="flex-1 h-16 text-base font-semibold rounded-xl" onClick={handleGallery}>
-                <ImagePlus className="mr-2 h-5 w-5" />
-                Galeria
+              <Button
+                variant="secondary"
+                size="icon"
+                className="h-14 w-14 shrink-0 rounded-xl"
+                onClick={handleGallery}
+                title="Selecionar da galeria"
+              >
+                <ImagePlus className="h-5 w-5" />
               </Button>
               <Button
-                className="flex-[1.2] h-16 text-base font-bold rounded-xl shadow-md"
+                className="flex-1 h-14 text-base font-bold rounded-xl shadow-md min-w-0"
                 onClick={capture}
                 disabled={isCapturingMulti || hasPermission === false}
               >
-                <Camera className="mr-2 h-6 w-6" />
+                <Camera className="mr-2 h-5 w-5 shrink-0" />
                 Capturar
               </Button>
               <Button
                 variant="outline"
-                className="flex-1 h-16 text-base font-bold rounded-xl"
+                className="flex-1 h-14 text-base font-bold rounded-xl min-w-0"
                 onClick={() => { stopCamera(); onFinishContinuous?.(); }}
                 disabled={continuousCount === 0}
               >
-                <Check className="mr-2 h-5 w-5" />
+                <Check className="mr-2 h-5 w-5 shrink-0" />
                 Concluir
               </Button>
             </>
