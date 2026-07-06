@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Loader2, Pencil } from "lucide-react";
+import { Loader2, Pencil, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAutoSyncLeilaoOnEnter } from "@/hooks/useAutoSyncLeilaoOnEnter";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
+import { toast } from "@/hooks/use-toast";
 import {
   getLeilaoHubSnapshot,
   type LeilaoHubSnapshot,
@@ -14,7 +15,7 @@ import {
   normalizeVistoriaStatusSync,
 } from "@/lib/db";
 import { duplicateTypeShortLabel } from "@/services/inspectionService";
-import { subscribeSyncUi } from "@/services/syncService";
+import { retryVistoriaFromHub, subscribeSyncUi } from "@/services/syncService";
 import { subscribeRealtimeUi } from "@/services/realtimeService";
 import { cn } from "@/lib/utils";
 
@@ -47,26 +48,37 @@ function statusHint(entry: LeilaoSyncQueueEntry): { label: string; tone: "ok" | 
 }
 
 function needsEdit(entry: LeilaoSyncQueueEntry): boolean {
-  const st = normalizeVistoriaStatusSync(entry.statusSync);
   return (
-    entry.queueFailed ||
-    st === "erro_sync" ||
-    isVistoriaSyncBlockedByDuplicate(entry.statusSync)
+    isVistoriaSyncBlockedByDuplicate(entry.statusSync) ||
+    normalizeVistoriaStatusSync(entry.statusSync) === "aguardando_ajuste"
   );
+}
+
+function canRetrySync(entry: LeilaoSyncQueueEntry): boolean {
+  if (isVistoriaSyncBlockedByDuplicate(entry.statusSync)) return false;
+  const st = normalizeVistoriaStatusSync(entry.statusSync);
+  if (st === "aguardando_ajuste") return false;
+  return entry.queueFailed || st === "erro_sync" || entry.fotoUploadFailed === true;
 }
 
 function VistoriaCard({
   entry,
   onEdit,
+  onRetry,
+  retryingId,
   variant = "default",
 }: {
   entry: LeilaoSyncQueueEntry;
   onEdit: (id: number) => void;
+  onRetry: (id: number) => void;
+  retryingId: number | null;
   variant?: "default" | "duplicate";
 }) {
   const hint = statusHint(entry);
   const showEdit = needsEdit(entry);
+  const showRetry = canRetrySync(entry);
   const isDup = isVistoriaSyncBlockedByDuplicate(entry.statusSync);
+  const isRetrying = retryingId === entry.vistoriaId;
 
   return (
     <div
@@ -108,17 +120,38 @@ function VistoriaCard({
         </span>
       </div>
 
-      {showEdit && (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="mt-3 h-9 w-full rounded-lg text-xs font-bold gap-1.5 border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-300"
-          onClick={() => onEdit(entry.vistoriaId)}
-        >
-          <Pencil className="h-3.5 w-3.5" />
-          Editar vistoria
-        </Button>
+      {(showRetry || showEdit) && (
+        <div className="mt-3 flex flex-col gap-2">
+          {showRetry && (
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              className="h-9 w-full rounded-lg text-xs font-bold gap-1.5"
+              disabled={isRetrying}
+              onClick={() => onRetry(entry.vistoriaId)}
+            >
+              {isRetrying ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              Tentar novamente
+            </Button>
+          )}
+          {showEdit && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-9 w-full rounded-lg text-xs font-bold gap-1.5 border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-300"
+              onClick={() => onEdit(entry.vistoriaId)}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Editar vistoria
+            </Button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -129,6 +162,7 @@ export function HubSyncQueue({ leilaoId }: Props) {
   const { pendingCount, syncing } = useSyncStatus();
   const [snapshot, setSnapshot] = useState<LeilaoHubSnapshot>({ latest: null, duplicates: [] });
   const [loading, setLoading] = useState(true);
+  const [retryingId, setRetryingId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -168,7 +202,22 @@ export function HubSyncQueue({ leilaoId }: Props) {
   }, [load]);
 
   const { latest, duplicates } = snapshot;
-  const goEdit = (id: number) => navigate(`/editar/${id}`);
+  const goEdit = (vid: number) => navigate(`/editar/${vid}`);
+
+  const handleRetry = useCallback(async (vistoriaId: number) => {
+    setRetryingId(vistoriaId);
+    try {
+      const result = await retryVistoriaFromHub(vistoriaId);
+      if (result.ok) {
+        toast({ title: "Reenvio iniciado", description: "Sincronizando em segundo plano." });
+        void load();
+      } else {
+        toast({ title: "Não foi possível reenviar", description: result.message, variant: "destructive" });
+      }
+    } finally {
+      setRetryingId(null);
+    }
+  }, [load]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col w-full max-w-md mx-auto px-4 gap-6">
@@ -183,7 +232,7 @@ export function HubSyncQueue({ leilaoId }: Props) {
           </div>
         ) : latest ? (
           <>
-            <VistoriaCard entry={latest} onEdit={goEdit} />
+            <VistoriaCard entry={latest} onEdit={goEdit} onRetry={handleRetry} retryingId={retryingId} />
             {(pendingCount > 0 || syncing) && normalizeVistoriaStatusSync(latest.statusSync) !== "sincronizado" && (
               <p className="text-[10px] text-amber-700 dark:text-amber-300 mt-2 font-medium">
                 {syncing ? "Sincronizando com a nuvem…" : `${pendingCount} item(ns) na fila`}
@@ -209,6 +258,8 @@ export function HubSyncQueue({ leilaoId }: Props) {
                 key={entry.vistoriaId}
                 entry={entry}
                 onEdit={goEdit}
+                onRetry={handleRetry}
+                retryingId={retryingId}
                 variant="duplicate"
               />
             ))}

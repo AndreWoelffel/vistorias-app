@@ -506,7 +506,36 @@ export async function enqueueVistoriaResync(localVistoriaId: number): Promise<En
   
   const hasCloud = Boolean(v.cloudVistoriaId?.trim());
   await addToQueue({ type: hasCloud ? 'update' : 'create', entity: 'vistoria', payload: { localVistoriaId } });
-  
-  await processQueue();
+
+  void processQueue();
   return { ok: true };
+}
+
+/** Reenvio manual a partir do hub — fila e/ou fotos, sem bloquear a UI. */
+export async function retryVistoriaFromHub(
+  localVistoriaId: number,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const v = await getVistoriaById(localVistoriaId);
+  if (!v) return { ok: false, message: 'Vistoria não encontrada.' };
+
+  const ns = normalizeVistoriaStatusSync(v.statusSync);
+
+  if (ns === 'aguardando_ajuste' || ns === 'conflito_duplicidade') {
+    return { ok: false, message: 'Corrija placa ou número antes de sincronizar.' };
+  }
+
+  if (v.fotoUploadFailed && v.cloudVistoriaId?.trim()) {
+    const { retryVistoriaFotoUpload } = await import('@/services/inspectionService');
+    const fotosOk = await retryVistoriaFotoUpload(localVistoriaId);
+    if (!fotosOk) return { ok: false, message: 'Não foi possível reenviar as fotos.' };
+    if (ns === 'sincronizado') return { ok: true };
+  }
+
+  if (ns === 'erro_sync' || ns === 'pendente_sync' || v.fotoUploadFailed) {
+    const r = await enqueueVistoriaResync(localVistoriaId);
+    if (!r.ok) return { ok: false, message: r.message ?? 'Não foi possível reenviar.' };
+    return { ok: true };
+  }
+
+  return { ok: false, message: 'Não há reenvio pendente para esta vistoria.' };
 }

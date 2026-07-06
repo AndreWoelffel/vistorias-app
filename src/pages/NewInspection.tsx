@@ -22,7 +22,7 @@ import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { RealtimeScannerCamera, type ScanCapture } from '@/components/RealtimeScannerCamera';
 import { addVistoria } from '@/hooks/useVistorias';
-import { addToQueue, getVistoriaById, normalizeVistoriaStatusSync, updateVistoria } from '@/lib/db';
+import { addToQueue, updateVistoria } from '@/lib/db';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
 import { generateUuid } from '@/lib/uuid';
@@ -51,7 +51,7 @@ import {
 import { processarPlaca } from '@/lib/plateValidator';
 import { beginPlateCapturePerf, logPlateCapturePerf } from '@/lib/plateOcrPerf';
 
-type Step = 'placa' | 'numero' | 'fotos' | 'saving';
+type Step = 'placa' | 'numero' | 'fotos';
 type CameraMode = 'placa' | 'numero' | 'chassi' | 'motor' | 'geral' | null;
 
 export default function NewInspection() {
@@ -106,6 +106,7 @@ export default function NewInspection() {
   const [stickerOcrConfidence, setStickerOcrConfidence] = useState<number | null>(null);
 
   const [showCancelDialog, setShowCancelDialog] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Rastreador de URLs (Memory Leak Prevention)
   const urlTracker = useRef<Set<string>>(new Set());
@@ -324,6 +325,15 @@ export default function NewInspection() {
       : { perfLabel: 'manual-capture' });
   }, [runOCR]);
 
+  const handleContinuousGeralCapture = useCallback(async (blob: Blob) => {
+    const compressed = await compressImage(blob);
+    const url = createTrackedUrl(compressed);
+    const timestamp = Date.now();
+    const file = new File([compressed], `FOTO_${placa || 'GERAL'}_${timestamp}.jpg`, { type: 'image/jpeg' });
+    setFotosGerais((prev) => [...prev, file]);
+    setFotosGeraisUrls((prev) => [...prev, url]);
+  }, [placa]);
+
   const handleCapture = async (blob: Blob) => {
     if (cameraMode === 'numero') {
       handleStickerCapture(blob);
@@ -341,14 +351,6 @@ export default function NewInspection() {
       const file = new File([compressed], `MOTOR_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' });
       setFotoMotor(file);
       setMotorUrl(url);
-    } else if (cameraMode === 'geral') {
-      setCameraMode(null);
-      const compressed = await compressImage(blob);
-      const url = createTrackedUrl(compressed);
-      const timestamp = new Date().getTime();
-      const file = new File([compressed], `FOTO_${placa || 'GERAL'}_${timestamp}.jpg`, { type: 'image/jpeg' });
-      setFotosGerais((prev) => [...prev, file]);
-      setFotosGeraisUrls((prev) => [...prev, url]);
     }
   };
 
@@ -364,13 +366,15 @@ export default function NewInspection() {
   // ════════════════════════════════════════════════════════════════════════
 
   const handleSave = async () => {
-    if (!placa || !numero) {
-      toast({ title: 'Campos obrigatórios', description: 'Preencha placa e número.', variant: 'destructive' });
+    if (!placa || !numero || isSubmitting) {
+      if (!placa || !numero) {
+        toast({ title: 'Campos obrigatórios', description: 'Preencha placa e número.', variant: 'destructive' });
+      }
       return;
     }
-    
-    setStep('saving');
-    
+
+    setIsSubmitting(true);
+
     try {
       const createdBy = user?.nome?.trim() || 'Desconhecido';
       const createdByUserId = user?.id?.trim() || null;
@@ -380,14 +384,12 @@ export default function NewInspection() {
         localUuid = generateUuid();
       } catch {
         toast({ title: 'Erro de ID', description: 'Feche o app e tente de novo.', variant: 'destructive' });
-        setStep('placa');
+        setIsSubmitting(false);
         return;
       }
 
-      // Consolida todas as fotos em um único array
       const allFotos: Blob[] = [...fotosGerais];
 
-      // Converte os Blobs da Placa e Adesivo em Arquivos Nomeados (Files)
       if (fotoPlaca) {
         allFotos.unshift(new File([fotoPlaca], `PLACA_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' }));
       }
@@ -395,14 +397,12 @@ export default function NewInspection() {
         allFotos.unshift(new File([fotoAdesivo], `ADESIVO_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' }));
       }
 
-      // Adiciona as fotos técnicas que já foram convertidas para File anteriormente
       if (hasChassi && fotoChassi) allFotos.push(fotoChassi);
       if (hasMotor && fotoMotor) allFotos.push(fotoMotor);
 
       const nowMs = Date.now();
       const finalPlacaUpper = placa.toUpperCase();
 
-      // Hard Example Mining: detecta se o usuário corrigiu a leitura da IA
       const isHardExample =
         placaOriginalIA !== null && placaOriginalIA !== finalPlacaUpper;
       const isYoloError =
@@ -443,42 +443,28 @@ export default function NewInspection() {
           duplicateInfo: localDup.info,
           duplicateConflictWith: localDup.conflictWith,
         });
-        await recalculateDuplicateVistoriasForLeilao(id);
+        void recalculateDuplicateVistoriasForLeilao(id);
+        toast({
+          title: 'Salva no aparelho',
+          description: duplicateUserMessage(localDup.type),
+          variant: 'destructive',
+        });
       } else {
         await addToQueue({ type: 'create', entity: 'vistoria', payload: { localVistoriaId: localId } });
         const { processQueue } = await import('@/services/syncService');
-        await processQueue();
-        await recalculateDuplicateVistoriasForLeilao(id);
+        void processQueue();
+        void recalculateDuplicateVistoriasForLeilao(id);
+        toast({
+          title: 'Vistoria registrada',
+          description: 'Sincronizando em segundo plano. Você já pode iniciar outra.',
+        });
       }
 
-      const v = await getVistoriaById(localId);
-      const st = normalizeVistoriaStatusSync(v?.statusSync);
-
-      if (st === 'aguardando_ajuste') {
-        toast({ title: 'Salva no aparelho', description: v?.syncMessage ?? 'Corrija e envie de novo.' });
-      } else if (st === 'conflito_duplicidade') {
-        toast({
-          title: 'Duplicado no servidor',
-          description: v?.syncMessage ?? 'Já existe essa placa ou número lá.',
-          variant: 'destructive',
-        });
-      } else if (st === 'sincronizado') {
-        toast({ title: 'Pronto', description: `Placa ${placa} já está no servidor.` });
-      } else if (st === 'erro_sync') {
-        toast({
-          title: 'Erro ao enviar',
-          description: v?.syncMessage ?? 'Sem internet ou falha no envio.',
-          variant: 'destructive',
-        });
-      } else {
-        toast({ title: 'Salva no aparelho', description: 'Enviamos automaticamente quando a internet voltar.' });
-      }
-      
       navigate(afterInspectionPath(id), { replace: true });
     } catch (err) {
       console.error(err);
       toast({ title: 'Não salvou', description: 'Tente de novo. Se continuar, feche e abra o app.', variant: 'destructive' });
-      setStep('fotos');
+      setIsSubmitting(false);
     }
   };
 
@@ -624,6 +610,10 @@ export default function NewInspection() {
       <CameraCapture
         title={title}
         overlayType="none"
+        continuousMode={cameraMode === 'geral'}
+        continuousCount={fotosGerais.length}
+        onContinuousCapture={cameraMode === 'geral' ? handleContinuousGeralCapture : undefined}
+        onFinishContinuous={cameraMode === 'geral' ? () => setCameraMode(null) : undefined}
         onCapture={handleCapture}
         onCancel={() => setCameraMode(null)}
       />
@@ -1106,54 +1096,45 @@ export default function NewInspection() {
               </div>
             </div>
           )}
-
-          {step === 'saving' && (
-            <div className="flex flex-col items-center justify-center py-24 gap-4">
-              <div className="bg-primary/10 p-4 rounded-full">
-                <Loader2 className="h-10 w-10 animate-spin text-primary" />
-              </div>
-              <div className="text-center space-y-1">
-                <p className="text-xl font-bold text-foreground">Salvando Vistoria</p>
-                <p className="text-sm font-medium text-muted-foreground px-6">
-                  Gravando no aparelho e enviando para nuvem...
-                </p>
-              </div>
-            </div>
-          )}
         </div>
 
-        {step !== 'saving' && (
-          <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border/50 bg-background/95 backdrop-blur-md px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
-            <div className="mx-auto flex max-w-lg w-full gap-2">
-              {step !== 'placa' && (
-                <Button 
-                  type="button" 
-                  variant="outline" 
-                  onClick={() => setStep(step === 'fotos' ? 'numero' : 'placa')} 
-                  className="h-14 min-w-[80px] rounded-xl"
-                >
-                  <ArrowLeft className="h-5 w-5" />
-                </Button>
-              )}
-              <Button 
-                type="submit" 
-                disabled={step === 'placa' ? !placa : step === 'numero' ? !numero : false} 
-                className="h-14 flex-1 text-lg font-bold rounded-xl shadow-lg"
+        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border/50 bg-background/95 backdrop-blur-md px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
+          <div className="mx-auto flex max-w-lg w-full gap-2">
+            {step !== 'placa' && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setStep(step === 'fotos' ? 'numero' : 'placa')}
+                className="h-14 min-w-[80px] rounded-xl"
+                disabled={isSubmitting}
               >
-                {step === 'fotos' ? (
-                  <>
-                    <Check className="mr-2 h-6 w-6" /> Concluir Vistoria
-                  </>
-                ) : (
-                  'Próximo Passo'
-                )}
+                <ArrowLeft className="h-5 w-5" />
               </Button>
-            </div>
+            )}
+            <Button
+              type="submit"
+              disabled={
+                isSubmitting ||
+                (step === 'placa' ? !placa : step === 'numero' ? !numero : false)
+              }
+              className="h-14 flex-1 text-lg font-bold rounded-xl shadow-lg"
+            >
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="mr-2 h-6 w-6 animate-spin" /> Salvando…
+                </>
+              ) : step === 'fotos' ? (
+                <>
+                  <Check className="mr-2 h-6 w-6" /> Concluir Vistoria
+                </>
+              ) : (
+                'Próximo Passo'
+              )}
+            </Button>
           </div>
-        )}
+        </div>
       </form>
 
-      {/* Cancel Confirmation Dialog */}
       <AlertDialog open={showCancelDialog} onOpenChange={setShowCancelDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -1164,8 +1145,8 @@ export default function NewInspection() {
           </AlertDialogHeader>
           <AlertDialogFooter className="gap-2">
             <AlertDialogCancel className="font-medium mt-0">Continuar Vistoria</AlertDialogCancel>
-            <AlertDialogAction 
-              onClick={confirmCancel} 
+            <AlertDialogAction
+              onClick={confirmCancel}
               className="bg-destructive text-destructive-foreground font-bold hover:bg-destructive/90"
             >
               Sim, descartar

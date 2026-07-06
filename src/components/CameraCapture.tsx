@@ -10,9 +10,25 @@ interface CameraCaptureProps {
   overlayType?: 'plate' | 'number' | 'none';
   title: string;
   multiFrame?: boolean;
+  /** Mantém a câmera aberta após cada foto (fotos gerais em sequência). */
+  continuousMode?: boolean;
+  continuousCount?: number;
+  onContinuousCapture?: (blob: Blob, dataUrl: string) => void;
+  onFinishContinuous?: () => void;
 }
 
-export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType = 'none', title, multiFrame = false }: CameraCaptureProps) {
+export function CameraCapture({
+  onCapture,
+  onMultiCapture,
+  onCancel,
+  overlayType = 'none',
+  title,
+  multiFrame = false,
+  continuousMode = false,
+  continuousCount = 0,
+  onContinuousCapture,
+  onFinishContinuous,
+}: CameraCaptureProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -128,17 +144,21 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
 
   const captureSingleOrRouteToCrop = async () => {
     const result = await captureFrame();
-    if (result) {
-      stopCamera();
-      
-      if (overlayType === 'none') {
-        // Foto livre (Carro), não precisa de crop manual, vai direto pra visualização final
-        setCapturedFinalBlob(result.blob);
-        setCapturedFinal(result.dataUrl);
-      } else {
-        // Placa ou Adesivo: abre a tela de corte interativo
-        setRawImageUrl(result.dataUrl);
-      }
+    if (!result) return;
+
+    if (continuousMode && onContinuousCapture) {
+      onContinuousCapture(result.blob, result.dataUrl);
+      if ('vibrate' in navigator) navigator.vibrate(40);
+      return;
+    }
+
+    stopCamera();
+
+    if (overlayType === 'none') {
+      setCapturedFinalBlob(result.blob);
+      setCapturedFinal(result.dataUrl);
+    } else {
+      setRawImageUrl(result.dataUrl);
     }
   };
 
@@ -172,17 +192,24 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
+
+    if (continuousMode && onContinuousCapture) {
+      const url = URL.createObjectURL(file);
+      onContinuousCapture(file, url);
+      URL.revokeObjectURL(url);
+      return;
+    }
+
     stopCamera();
 
     const url = URL.createObjectURL(file);
-    
+
     if (overlayType === 'none') {
-      // Foto Livre
       setCapturedFinal(url);
       setCapturedFinalBlob(file);
     } else {
-      // Placa ou Adesivo: Manda para o editor de corte
       setRawImageUrl(url);
     }
   };
@@ -224,7 +251,16 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
       <div className="flex items-center justify-between p-4 border-b border-border/50 bg-card">
-        <h2 className="text-lg font-bold text-foreground">{title}</h2>
+        <div className="min-w-0">
+          <h2 className="text-lg font-bold text-foreground truncate">{title}</h2>
+          {continuousMode && (
+            <p className="text-xs font-semibold text-primary tabular-nums">
+              {continuousCount === 0
+                ? 'Nenhuma foto ainda'
+                : `${continuousCount} foto${continuousCount === 1 ? '' : 's'} capturada${continuousCount === 1 ? '' : 's'}`}
+            </p>
+          )}
+        </div>
         <Button variant="ghost" size="icon" onClick={() => { stopCamera(); onCancel(); }}>
           <X className="h-6 w-6" />
         </Button>
@@ -300,6 +336,31 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
 
       <div className="flex gap-3 p-4 bg-card border-t border-border/50 pb-[max(1rem,env(safe-area-inset-bottom))]">
         {!capturedFinal ? (
+          continuousMode ? (
+            <>
+              <Button variant="secondary" className="flex-1 h-16 text-base font-semibold rounded-xl" onClick={handleGallery}>
+                <ImagePlus className="mr-2 h-5 w-5" />
+                Galeria
+              </Button>
+              <Button
+                className="flex-[1.2] h-16 text-base font-bold rounded-xl shadow-md"
+                onClick={capture}
+                disabled={isCapturingMulti || hasPermission === false}
+              >
+                <Camera className="mr-2 h-6 w-6" />
+                Capturar
+              </Button>
+              <Button
+                variant="outline"
+                className="flex-1 h-16 text-base font-bold rounded-xl"
+                onClick={() => { stopCamera(); onFinishContinuous?.(); }}
+                disabled={continuousCount === 0}
+              >
+                <Check className="mr-2 h-5 w-5" />
+                Concluir
+              </Button>
+            </>
+          ) : (
           <>
             <Button variant="secondary" className="flex-1 h-16 text-base font-semibold rounded-xl" onClick={handleGallery}>
               <ImagePlus className="mr-2 h-5 w-5" />
@@ -314,6 +375,7 @@ export function CameraCapture({ onCapture, onMultiCapture, onCancel, overlayType
               {multiFrame ? 'ALPR (3x)' : 'Capturar'}
             </Button>
           </>
+          )
         ) : (
           <>
             <Button variant="outline" className="flex-1 h-14 text-base font-semibold rounded-xl" onClick={retake}>

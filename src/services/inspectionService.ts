@@ -354,6 +354,20 @@ async function pushLocalFotosToCloud(opts: {
   return { uploadFailed: fotoSync.uploadFailed };
 }
 
+/** Reenvia fotos locais de uma vistoria já na nuvem (ex.: falha parcial de upload). */
+export async function retryVistoriaFotoUpload(localVistoriaId: number): Promise<boolean> {
+  const v = await getVistoriaById(localVistoriaId);
+  const cloudId = v?.cloudVistoriaId?.trim();
+  if (!v || !cloudId || !isValidUuid(cloudId) || !v.fotos?.length) return false;
+  const { uploadFailed } = await pushLocalFotosToCloud({
+    leilaoId: v.leilaoId,
+    cloudVistoriaId: cloudId,
+    fotos: v.fotos,
+    localVistoriaId: v.id,
+  });
+  return !uploadFailed;
+}
+
 /** Reenvia todas as fotos locais das vistorias já na nuvem (idempotente). */
 export async function resyncAllFotosForLeilao(localLeilaoId: number): Promise<void> {
   const list = await getVistoriasByLeilao(localLeilaoId, { includePendingCloudDelete: false });
