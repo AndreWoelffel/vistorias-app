@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
-import { type YOLOBox } from '@/lib/imageUtils';
+import { type YOLOBox, resetPlatePreviewCache } from '@/lib/imageUtils';
 
 // ─── Tipos públicos ───────────────────────────────────────────────────────────
 
@@ -118,39 +118,49 @@ function drawBoxesOnCanvas(
   }
 }
 
-function snapVideoFrame(
+function snapVideoFrameToCanvas(
   video: HTMLVideoElement,
   squareCenterCrop = false,
-): Promise<{ blob: Blob; canvas: HTMLCanvasElement }> {
+): HTMLCanvasElement | null {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const c = document.createElement('canvas');
+  const ctx = c.getContext('2d');
+  if (!ctx || vw === 0 || vh === 0) return null;
+
+  if (squareCenterCrop) {
+    const cropSize = Math.min(vw, vh);
+    const startX = (vw - cropSize) / 2;
+    const startY = (vh - cropSize) / 2;
+    c.width = cropSize;
+    c.height = cropSize;
+    ctx.drawImage(video, startX, startY, cropSize, cropSize, 0, 0, cropSize, cropSize);
+  } else {
+    c.width = vw;
+    c.height = vh;
+    ctx.drawImage(video, 0, 0);
+  }
+
+  return c;
+}
+
+function canvasToJpegBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => {
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const c = document.createElement('canvas');
-    const ctx = c.getContext('2d');
-    if (!ctx || vw === 0 || vh === 0) {
-      reject(new Error('snap: invalid video'));
-      return;
-    }
-
-    if (squareCenterCrop) {
-      const cropSize = Math.min(vw, vh);
-      const startX = (vw - cropSize) / 2;
-      const startY = (vh - cropSize) / 2;
-      c.width = cropSize;
-      c.height = cropSize;
-      ctx.drawImage(video, startX, startY, cropSize, cropSize, 0, 0, cropSize, cropSize);
-    } else {
-      c.width = vw;
-      c.height = vh;
-      ctx.drawImage(video, 0, 0);
-    }
-
-    c.toBlob(
-      (b) => (b ? resolve({ blob: b, canvas: c }) : reject(new Error('toBlob: null'))),
+    canvas.toBlob(
+      (b) => (b ? resolve(b) : reject(new Error('toBlob: null'))),
       'image/jpeg',
       0.92,
     );
   });
+}
+
+function snapVideoFrame(
+  video: HTMLVideoElement,
+  squareCenterCrop = false,
+): Promise<{ blob: Blob; canvas: HTMLCanvasElement }> {
+  const canvas = snapVideoFrameToCanvas(video, squareCenterCrop);
+  if (!canvas) return Promise.reject(new Error('snap: invalid video'));
+  return canvasToJpegBlob(canvas).then((blob) => ({ blob, canvas }));
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
@@ -227,16 +237,8 @@ export function useRealtimeScanner({
     const video = videoRef.current;
     if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
-    let frameBlob: Blob;
-    let frameCanvas: HTMLCanvasElement;
-    try {
-      ({ blob: frameBlob, canvas: frameCanvas } = await snapVideoFrame(
-        video,
-        squareCropRef.current,
-      ));
-    } catch {
-      return;
-    }
+    const frameCanvas = snapVideoFrameToCanvas(video, squareCropRef.current);
+    if (!frameCanvas) return;
 
     let result: RealtimeScanFrameResult;
     try {
@@ -261,25 +263,42 @@ export function useRealtimeScanner({
       );
     }
 
-    setState({
-      boxes: result.boxes,
-      stableCount,
-      isLocked: false,
-      previewText: result.previewText,
-      previewConfidence: result.previewConfidence,
+    setState((prev) => {
+      if (
+        prev.stableCount === stableCount &&
+        prev.previewText === result.previewText &&
+        prev.previewConfidence === result.previewConfidence &&
+        prev.boxes.length === result.boxes.length
+      ) {
+        return prev;
+      }
+      return {
+        boxes: result.boxes,
+        stableCount,
+        isLocked: false,
+        previewText: result.previewText,
+        previewConfidence: result.previewConfidence,
+      };
     });
 
     if (stableCount >= stableFramesRef.current) {
       lockedRef.current = true;
       setState((s) => ({ ...s, isLocked: true }));
       if ('vibrate' in navigator) navigator.vibrate(200);
-      onAutoCaptureRef.current({
-        originalImageBlob: frameBlob,
-        yoloData: result.boxes,
-        previewText: result.previewText,
-        previewConfidence: result.previewConfidence,
-        gateApproved: true,
-      });
+      try {
+        const frameBlob = await canvasToJpegBlob(frameCanvas);
+        onAutoCaptureRef.current({
+          originalImageBlob: frameBlob,
+          yoloData: result.boxes,
+          previewText: result.previewText,
+          previewConfidence: result.previewConfidence,
+          gateApproved: true,
+        });
+      } catch {
+        /* captura falhou — desbloqueia para nova tentativa */
+        lockedRef.current = false;
+        setState((s) => ({ ...s, isLocked: false }));
+      }
     }
   }, [videoRef, overlayCanvasRef, updateStability]);
 
@@ -341,6 +360,7 @@ export function useRealtimeScanner({
     lastInferenceTs.current = 0;
     inferringRef.current = false;
     lastPreviewTextRef.current = undefined;
+    resetPlatePreviewCache();
     setState({ boxes: [], stableCount: 0, isLocked: false });
 
     rafRef.current = requestAnimationFrame(loop);

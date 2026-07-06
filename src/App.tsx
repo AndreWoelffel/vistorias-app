@@ -17,7 +17,6 @@ import UsuariosPage from "./pages/UsuariosPage";
 import NotFound from "./pages/NotFound";
 import { SyncBridge } from "@/components/SyncBridge";
 import { SyncNotifications } from "@/components/SyncNotifications";
-import { OfflineNotice } from "@/components/OfflineNotice";
 import { InstallPwaPrompt } from "@/components/InstallPwaPrompt";
 
 const queryClient = new QueryClient();
@@ -41,7 +40,6 @@ const App = () => (
       <Toaster />
       <Sonner />
       <BrowserRouter>
-        <OfflineNotice />
         <SyncBridge />
         <SyncNotifications />
         <InstallPwaPrompt />

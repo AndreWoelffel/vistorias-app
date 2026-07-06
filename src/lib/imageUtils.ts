@@ -1025,17 +1025,11 @@ async function classifyPlateCharsOnFrame(
   };
 }
 
-/**
- * Preview da placa: YOLO localiza → CNN classifica → nitidez.
- * Só retorna `passesGate: true` quando todos os critérios são atendidos.
- */
-export async function scanFrameForPlateWithCNN(
+async function scanFrameForPlateWithCNNFromBoxes(
   frameCanvas: HTMLCanvasElement,
+  boxes: YOLOBox[],
+  yoloMs = 0,
 ): Promise<PlateFrameScanResult> {
-  const yoloStart = import.meta.env.DEV ? performance.now() : 0;
-  const boxes = await detectPlateCharBoxesOnCanvas(frameCanvas);
-  const yoloMs = import.meta.env.DEV ? performance.now() - yoloStart : 0;
-
   const empty: PlateFrameScanResult = {
     boxes,
     plateText: '',
@@ -1088,6 +1082,33 @@ export async function scanFrameForPlateWithCNN(
   };
 }
 
+/**
+ * Preview da placa: YOLO localiza → CNN classifica → nitidez.
+ * Só retorna `passesGate: true` quando todos os critérios são atendidos.
+ */
+export async function scanFrameForPlateWithCNN(
+  frameCanvas: HTMLCanvasElement,
+): Promise<PlateFrameScanResult> {
+  const yoloStart = import.meta.env.DEV ? performance.now() : 0;
+  const boxes = await detectPlateCharBoxesOnCanvas(frameCanvas);
+  const yoloMs = import.meta.env.DEV ? performance.now() - yoloStart : 0;
+  return scanFrameForPlateWithCNNFromBoxes(frameCanvas, boxes, yoloMs);
+}
+
+/** Intervalo mínimo entre passagens CNN no preview — mantém câmera fluida. */
+const PLATE_CNN_PREVIEW_INTERVAL_MS = 550;
+
+let platePreviewCache: {
+  previewText?: string;
+  previewConfidence?: number;
+  passesGate: boolean;
+  lastCnnAt: number;
+} = { passesGate: false, lastCnnAt: 0 };
+
+export function resetPlatePreviewCache(): void {
+  platePreviewCache = { passesGate: false, lastCnnAt: 0 };
+}
+
 /** Adapta o resultado da placa para o hook de scanner em tempo real. */
 export async function scanPlateFrameForRealtime(
   frameCanvas: HTMLCanvasElement,
@@ -1097,12 +1118,39 @@ export async function scanPlateFrameForRealtime(
   previewText?: string;
   previewConfidence?: number;
 }> {
-  const result = await scanFrameForPlateWithCNN(frameCanvas);
+  const yoloStart = import.meta.env.DEV ? performance.now() : 0;
+  const boxes = await detectPlateCharBoxesOnCanvas(frameCanvas);
+  const yoloMs = import.meta.env.DEV ? performance.now() - yoloStart : 0;
+
+  if (boxes.length < PLATE_CAPTURE_THRESHOLDS.targetCharCount) {
+    return { boxes, ready: false };
+  }
+
+  const now = performance.now();
+  const dueForCnn = now - platePreviewCache.lastCnnAt >= PLATE_CNN_PREVIEW_INTERVAL_MS;
+
+  if (!dueForCnn) {
+    return {
+      boxes,
+      ready: platePreviewCache.passesGate,
+      previewText: platePreviewCache.previewText,
+      previewConfidence: platePreviewCache.previewConfidence,
+    };
+  }
+
+  const result = await scanFrameForPlateWithCNNFromBoxes(frameCanvas, boxes, yoloMs);
+  platePreviewCache = {
+    previewText: result.plateText || undefined,
+    previewConfidence: result.avgConfidence > 0 ? result.avgConfidence : undefined,
+    passesGate: result.passesGate,
+    lastCnnAt: now,
+  };
+
   return {
     boxes: result.boxes,
     ready: result.passesGate,
-    previewText: result.plateText || undefined,
-    previewConfidence: result.avgConfidence > 0 ? result.avgConfidence : undefined,
+    previewText: platePreviewCache.previewText,
+    previewConfidence: platePreviewCache.previewConfidence,
   };
 }
 
