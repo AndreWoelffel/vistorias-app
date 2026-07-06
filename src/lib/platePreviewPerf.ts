@@ -8,7 +8,13 @@ export type PlatePreviewFrameType = 'yolo-only' | 'cnn-full' | 'cnn-skipped';
 export type PlatePreviewFrameSample = {
   frameIndex: number;
   frameType: PlatePreviewFrameType;
+  /** tf.getBackend() no momento da amostra */
   tfBackend: string;
+  userAgent: string;
+  videoWidth: number;
+  videoHeight: number;
+  /** Intervalo entre callbacks consecutivos de requestAnimationFrame */
+  rafMs: number;
   drawImageMs: number;
   yoloLetterboxMs: number;
   yoloInferMs: number;
@@ -26,6 +32,9 @@ export type PlatePreviewFrameSample = {
   charCnnTensorReadMs: number[];
   textAssemblyMs: number;
   gateMs: number;
+  /** drawBoxesOnCanvas — somente desenho das caixas */
+  drawOverlayMs: number;
+  /** Redimensionamento do canvas + drawOverlay */
   overlayMs: number;
   reactSetStateMs: number;
   totalMs: number;
@@ -43,6 +52,14 @@ export type MetricStats = {
 export type PlatePreviewProfilerReport = {
   sampleCount: number;
   tfBackend: string;
+  environment: {
+    tfBackend: string;
+    userAgent: string;
+    videoWidth: number;
+    videoHeight: number;
+    cameraResolution: string;
+  };
+  averageOverlayMs: number;
   byFrameType: Record<PlatePreviewFrameType, number>;
   metrics: Record<string, MetricStats>;
   charPreprocess: MetricStats[];
@@ -133,6 +150,10 @@ export function beginPlatePreviewFrame(tfBackend = ''): void {
     _started: performance.now(),
     frameIndex: frameCounter,
     tfBackend,
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+    videoWidth: 0,
+    videoHeight: 0,
+    rafMs: 0,
     drawImageMs: 0,
     yoloLetterboxMs: 0,
     yoloInferMs: 0,
@@ -145,6 +166,7 @@ export function beginPlatePreviewFrame(tfBackend = ''): void {
     charCnnTensorReadMs: emptyCharArray(),
     textAssemblyMs: 0,
     gateMs: 0,
+    drawOverlayMs: 0,
     overlayMs: 0,
     reactSetStateMs: 0,
     longTasks: [],
@@ -227,6 +249,10 @@ export function endPlatePreviewFrame(
     frameIndex: frameCounter,
     frameType: p.frameType ?? rest.frameType ?? 'yolo-only',
     tfBackend: p.tfBackend ?? rest.tfBackend ?? '',
+    userAgent: p.userAgent ?? rest.userAgent ?? '',
+    videoWidth: p.videoWidth ?? rest.videoWidth ?? 0,
+    videoHeight: p.videoHeight ?? rest.videoHeight ?? 0,
+    rafMs: p.rafMs ?? rest.rafMs ?? 0,
     drawImageMs: p.drawImageMs ?? rest.drawImageMs ?? 0,
     yoloLetterboxMs: p.yoloLetterboxMs ?? rest.yoloLetterboxMs ?? 0,
     yoloInferMs: p.yoloInferMs ?? rest.yoloInferMs ?? 0,
@@ -239,6 +265,7 @@ export function endPlatePreviewFrame(
     charCnnTensorReadMs: [...(p.charCnnTensorReadMs ?? rest.charCnnTensorReadMs ?? emptyCharArray())],
     textAssemblyMs: p.textAssemblyMs ?? rest.textAssemblyMs ?? 0,
     gateMs: p.gateMs ?? rest.gateMs ?? 0,
+    drawOverlayMs: p.drawOverlayMs ?? rest.drawOverlayMs ?? 0,
     overlayMs: p.overlayMs ?? rest.overlayMs ?? 0,
     reactSetStateMs: p.reactSetStateMs ?? rest.reactSetStateMs ?? 0,
     totalMs: performance.now() - started,
@@ -293,6 +320,7 @@ function buildProfilerReport(allSamples: PlatePreviewFrameSample[]): PlatePrevie
 
   const metricDefs: Array<{ key: string; fn: (s: PlatePreviewFrameSample) => number }> = [
     { key: 'totalMs', fn: (s) => s.totalMs },
+    { key: 'rafMs', fn: (s) => s.rafMs },
     { key: 'drawImageMs', fn: (s) => s.drawImageMs },
     { key: 'yoloLetterboxMs', fn: (s) => s.yoloLetterboxMs },
     { key: 'yoloInferMs', fn: (s) => s.yoloInferMs },
@@ -302,6 +330,7 @@ function buildProfilerReport(allSamples: PlatePreviewFrameSample[]): PlatePrevie
     { key: 'sharpnessMs', fn: (s) => s.sharpnessMs },
     { key: 'textAssemblyMs', fn: (s) => s.textAssemblyMs },
     { key: 'gateMs', fn: (s) => s.gateMs },
+    { key: 'drawOverlayMs', fn: (s) => s.drawOverlayMs },
     { key: 'overlayMs', fn: (s) => s.overlayMs },
     { key: 'reactSetStateMs', fn: (s) => s.reactSetStateMs },
     {
@@ -363,7 +392,8 @@ function buildProfilerReport(allSamples: PlatePreviewFrameSample[]): PlatePrevie
     { label: 'gpuSyncTotal (YOLO read + CNN reads)', stats: metrics.gpuSyncTotalMs },
     { label: 'textAssembly', stats: metrics.textAssemblyMs },
     { label: 'gate', stats: metrics.gateMs },
-    { label: 'overlay', stats: metrics.overlayMs },
+    { label: 'drawOverlay', stats: metrics.drawOverlayMs },
+    { label: 'overlay (resize+draw)', stats: metrics.overlayMs },
     { label: 'reactSetState', stats: metrics.reactSetStateMs },
   ].sort((a, b) => b.stats.p95 - a.stats.p95);
 
@@ -374,7 +404,17 @@ function buildProfilerReport(allSamples: PlatePreviewFrameSample[]): PlatePrevie
   }));
 
   const analysis: string[] = [];
-  const backend = allSamples[allSamples.length - 1]?.tfBackend ?? 'unknown';
+  const lastSample = allSamples[allSamples.length - 1];
+  const backend =
+    [...new Set(allSamples.map((s) => s.tfBackend).filter(Boolean))].join(', ') ||
+    lastSample?.tfBackend ||
+    'unknown';
+  const envSample =
+    allSamples.find((s) => s.videoWidth > 0 && s.videoHeight > 0) ?? lastSample;
+  const videoWidth = envSample?.videoWidth ?? 0;
+  const videoHeight = envSample?.videoHeight ?? 0;
+  const userAgent = allSamples.find((s) => s.userAgent)?.userAgent ?? '';
+  const averageOverlayMs = metrics.drawOverlayMs?.avg ?? 0;
   const gpuP95 = metrics.gpuSyncTotalMs?.p95 ?? 0;
   const cnnPredictP95 = metrics.charCnnPredictTotalMs?.p95 ?? 0;
   const cnnReadP95 = metrics.charCnnTensorReadTotalMs?.p95 ?? 0;
@@ -383,6 +423,10 @@ function buildProfilerReport(allSamples: PlatePreviewFrameSample[]): PlatePrevie
   const yoloInferP95 = metrics.yoloInferMs?.p95 ?? 0;
 
   analysis.push(`Backend TensorFlow.js: ${backend}`);
+  analysis.push(
+    `Resolução da câmera: ${videoWidth > 0 ? `${videoWidth}×${videoHeight}` : 'desconhecida'}`,
+  );
+  analysis.push(`Overlay (drawBoxesOnCanvas) médio: ${averageOverlayMs.toFixed(1)} ms`);
   analysis.push(
     `Frames: ${allSamples.length} total | yolo-only=${byFrameType['yolo-only']} | cnn-full=${byFrameType['cnn-full']} | cnn-skipped=${byFrameType['cnn-skipped']}`,
   );
@@ -414,6 +458,14 @@ function buildProfilerReport(allSamples: PlatePreviewFrameSample[]): PlatePrevie
   return {
     sampleCount: allSamples.length,
     tfBackend: backend,
+    environment: {
+      tfBackend: backend,
+      userAgent,
+      videoWidth,
+      videoHeight,
+      cameraResolution: videoWidth > 0 ? `${videoWidth}x${videoHeight}` : 'unknown',
+    },
+    averageOverlayMs,
     byFrameType,
     metrics,
     charPreprocess,
@@ -432,6 +484,7 @@ function buildProfilerReport(allSamples: PlatePreviewFrameSample[]): PlatePrevie
 
 function printProfilerReport(report: PlatePreviewProfilerReport): void {
   console.group(`[PlatePreview Profiler] Relatório — ${report.sampleCount} inferências`);
+  console.log('Ambiente:', report.environment);
   console.log('Análise:', report.analysis.join(' | '));
 
   const tableRows: Record<string, string> = {};

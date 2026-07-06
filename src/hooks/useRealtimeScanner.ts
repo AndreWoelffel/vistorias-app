@@ -201,6 +201,8 @@ export function useRealtimeScanner({
   const squareCropRef = useRef(squareCenterCrop);
   const frameCanvasScratchRef = useRef<HTMLCanvasElement | null>(null);
   const overlaySizeRef = useRef({ w: 0, h: 0 });
+  const lastRafCallbackAtRef = useRef(0);
+  const pendingRafMsRef = useRef(0);
 
   useEffect(() => { onAutoCaptureRef.current = onAutoCapture; }, [onAutoCapture]);
   useEffect(() => { scanFnRef.current = scanFn; }, [scanFn]);
@@ -261,7 +263,16 @@ export function useRealtimeScanner({
     if (!frameCanvas) return;
     frameCanvasScratchRef.current = frameCanvas;
 
-    if (perfPlate) beginPlatePreviewFrame(getActiveTfBackend());
+    if (perfPlate) {
+      beginPlatePreviewFrame(getActiveTfBackend());
+      patchPlatePreviewFrame({
+        rafMs: pendingRafMsRef.current,
+        userAgent: navigator.userAgent,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        tfBackend: getActiveTfBackend(),
+      });
+    }
 
     if (perfPlate) {
       const drawImageMs = performance.now() - drawStart;
@@ -282,7 +293,8 @@ export function useRealtimeScanner({
     const stableCount = updateStability(result);
 
     const overlay = overlayCanvasRef.current;
-    const overlayStart = perfPlate ? performance.now() : 0;
+    const overlayBlockStart = perfPlate ? performance.now() : 0;
+    let drawOverlayMs = 0;
     if (overlay) {
       const vw = video.videoWidth;
       const vh = video.videoHeight;
@@ -291,6 +303,7 @@ export function useRealtimeScanner({
         overlay.height = vh;
         overlaySizeRef.current = { w: vw, h: vh };
       }
+      const drawOverlayStart = perfPlate ? performance.now() : 0;
       drawBoxesOnCanvas(
         overlay,
         result.boxes,
@@ -299,12 +312,15 @@ export function useRealtimeScanner({
         stableCount,
         stableFramesRef.current,
       );
+      if (perfPlate) {
+        drawOverlayMs = performance.now() - drawOverlayStart;
+      }
     }
     if (perfPlate) {
-      const overlayMs = performance.now() - overlayStart;
-      patchPlatePreviewFrame({ overlayMs });
-      if (overlayMs >= 16) {
-        patchPlatePreviewFrame({ longTasks: [{ label: 'overlay', ms: overlayMs }] });
+      const overlayMs = performance.now() - overlayBlockStart;
+      patchPlatePreviewFrame({ drawOverlayMs, overlayMs });
+      if (drawOverlayMs >= 16) {
+        patchPlatePreviewFrame({ longTasks: [{ label: 'drawOverlay', ms: drawOverlayMs }] });
       }
     }
 
@@ -357,6 +373,13 @@ export function useRealtimeScanner({
 
   const loop = useCallback(() => {
     if (lockedRef.current) return;
+
+    const rafCallbackAt = performance.now();
+    if (lastRafCallbackAtRef.current > 0) {
+      pendingRafMsRef.current = rafCallbackAt - lastRafCallbackAtRef.current;
+    }
+    lastRafCallbackAtRef.current = rafCallbackAt;
+
     rafRef.current = requestAnimationFrame(loop);
 
     const now = performance.now();
@@ -413,6 +436,8 @@ export function useRealtimeScanner({
     lastInferenceTs.current = 0;
     inferringRef.current = false;
     lastPreviewTextRef.current = undefined;
+    lastRafCallbackAtRef.current = 0;
+    pendingRafMsRef.current = 0;
     resetPlatePreviewCache();
     resetPlatePreviewPerf();
     frameCanvasScratchRef.current = null;
