@@ -11,13 +11,6 @@ import {
   recordPostCaptureCnn,
   recordPostCaptureYolo,
 } from '@/lib/plateOcrPerf';
-import {
-  isPlatePreviewProfiling,
-  measurePlatePreviewSync,
-  patchPlatePreviewFrame,
-  recordPlatePreviewCharCnn,
-  recordPlatePreviewCharPreprocess,
-} from '@/lib/platePreviewPerf';
 // Backend super-rápido para CPU caso o celular não suporte WebGL (Placa de vídeo)
 import '@tensorflow/tfjs-backend-wasm';
 import { setWasmPaths } from '@tensorflow/tfjs-backend-wasm';
@@ -58,15 +51,6 @@ function ensureTF(): Promise<void> {
     })();
   }
   return tfReady;
-}
-
-/** Backend TF.js ativo (webgl, wasm ou cpu) — útil para diagnóstico DEV. */
-export function getActiveTfBackend(): string {
-  try {
-    return tf.getBackend() ?? 'unknown';
-  } catch {
-    return 'unknown';
-  }
 }
 
 let plateYoloScratchCanvas: HTMLCanvasElement | null = null;
@@ -233,21 +217,9 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     return t;
   });
 
-  const profile = isPlatePreviewProfiling();
-  const readStart = profile ? performance.now() : 0;
   const data = await tensor.array() as number[][];
-  if (profile) {
-    const readMs = performance.now() - readStart;
-    patchPlatePreviewFrame({ yoloTensorReadMs: readMs });
-    if (readMs >= 16) {
-      patchPlatePreviewFrame({
-        longTasks: [{ label: 'yolo.tensor.array', ms: readMs }],
-      });
-    }
-  }
   tensor.dispose();
 
-  const logicStart = profile ? performance.now() : 0;
   const rawBoxes: YOLOBox[] = [];
 
   for (const row of data) {
@@ -345,16 +317,6 @@ export async function decodeYOLOOutput(output: tf.Tensor, gain: number, padX: nu
     if (Math.abs(yDiff) > a.h * 0.5) return yDiff; 
     return a.x - b.x;
   });
-
-  if (profile) {
-    const logicMs = performance.now() - logicStart;
-    patchPlatePreviewFrame({ yoloDecodeLogicMs: logicMs });
-    if (logicMs >= 16) {
-      patchPlatePreviewFrame({
-        longTasks: [{ label: 'yolo.decodeLogic', ms: logicMs }],
-      });
-    }
-  }
 
   return charBoxes;
 }
@@ -542,23 +504,12 @@ async function predictCharWithCNN(
   cnnModel: tf.LayersModel | tf.GraphModel,
   tensor: tf.Tensor4D,
   position?: number,
-  perfCharIndex?: number,
 ): Promise<{ char: string; confidence: number }> {
-  const profile = isPlatePreviewProfiling();
-  const predictStart = profile ? performance.now() : 0;
   const logits = cnnModel.predict(tensor) as tf.Tensor;
-  const predictMs = profile ? performance.now() - predictStart : 0;
-
-  const readStart = profile ? performance.now() : 0;
   const data = (await logits.data()) as Float32Array;
-  const readMs = profile ? performance.now() - readStart : 0;
 
   logits.dispose();
   tensor.dispose();
-
-  if (profile && perfCharIndex !== undefined) {
-    recordPlatePreviewCharCnn(perfCharIndex, predictMs, readMs);
-  }
 
   let char: string;
   if (position !== undefined) {
@@ -633,34 +584,20 @@ async function classifyPlateCharsFromImageData(
   const charDebugImages: string[] = [];
 
   for (let i = 0; i < sorted.length; i++) {
-    const cropStart = perfContext === 'preview' ? performance.now() : 0;
     const { tensor, debugUrl } = cropAndPrepareForCNN(imageData, origW, origH, sorted[i], {
       includeDebugUrl: collectDebug,
     });
-    if (perfContext === 'preview') {
-      recordPlatePreviewCharPreprocess(i, performance.now() - cropStart);
-    }
 
     if (collectDebug) charDebugImages.push(debugUrl);
 
-    charResults.push(
-      await predictCharWithCNN(cnn, tensor, i, perfContext === 'preview' ? i : undefined),
-    );
+    charResults.push(await predictCharWithCNN(cnn, tensor, i));
   }
 
   if (perfContext === 'post') {
     recordPostCaptureCnn(charResults.length, performance.now() - cnnStart);
   }
 
-  const textStart = perfContext === 'preview' ? performance.now() : 0;
   const { plateText, avgConfidence, charConfidences } = buildPlateTextFromCharResults(charResults);
-  if (perfContext === 'preview') {
-    const textAssemblyMs = performance.now() - textStart;
-    patchPlatePreviewFrame({ textAssemblyMs });
-    if (textAssemblyMs >= 16) {
-      patchPlatePreviewFrame({ longTasks: [{ label: 'textAssembly', ms: textAssemblyMs }] });
-    }
-  }
 
   if (import.meta.env.DEV && perfContext === 'post') {
     alprDevLog('=========================================');
@@ -941,7 +878,6 @@ async function detectPlateCharBoxesOnCanvas(
   const origH = frameCanvas.height;
   if (origW === 0 || origH === 0) return [];
 
-  const letterboxStart = isPlatePreviewProfiling() ? performance.now() : 0;
   const yoloCanvas = getPlateYoloScratchCanvas();
   const yoloCtx = yoloCanvas.getContext('2d')!;
   yoloCtx.fillStyle = '#000000';
@@ -950,27 +886,12 @@ async function detectPlateCharBoxesOnCanvas(
   const padX = (YOLO_INPUT_SIZE - origW * gain) / 2;
   const padY = (YOLO_INPUT_SIZE - origH * gain) / 2;
   yoloCtx.drawImage(frameCanvas, 0, 0, origW, origH, padX, padY, origW * gain, origH * gain);
-  if (isPlatePreviewProfiling()) {
-    const letterboxMs = performance.now() - letterboxStart;
-    patchPlatePreviewFrame({ yoloLetterboxMs: letterboxMs });
-    if (letterboxMs >= 16) {
-      patchPlatePreviewFrame({ longTasks: [{ label: 'yolo.letterbox', ms: letterboxMs }] });
-    }
-  }
 
-  const inferStart = isPlatePreviewProfiling() ? performance.now() : 0;
   const output = tf.tidy(() => {
     const t = (tf.browser.fromPixels(yoloCanvas, 3) as tf.Tensor3D)
       .expandDims(0).toFloat().div(255.0) as tf.Tensor4D;
     return (yolo as tf.GraphModel).predict(t) as tf.Tensor;
   }) as tf.Tensor;
-  if (isPlatePreviewProfiling()) {
-    const yoloInferMs = performance.now() - inferStart;
-    patchPlatePreviewFrame({ yoloInferMs, tfBackend: getActiveTfBackend() });
-    if (yoloInferMs >= 16) {
-      patchPlatePreviewFrame({ longTasks: [{ label: 'yolo.predict', ms: yoloInferMs }] });
-    }
-  }
 
   const rawOut = Array.isArray(output) ? output[0] : output;
   const charBoxes = await decodeYOLOOutput(rawOut, gain, padX, padY);
@@ -1144,15 +1065,7 @@ async function scanFrameForPlateWithCNNFromBoxes(
   const origW = frameCanvas.width;
   const origH = frameCanvas.height;
 
-  const getImageStart = isPlatePreviewProfiling() ? performance.now() : 0;
   const imageData = frameCanvas.getContext('2d')!.getImageData(0, 0, origW, origH).data;
-  if (isPlatePreviewProfiling()) {
-    const getImageDataMs = performance.now() - getImageStart;
-    patchPlatePreviewFrame({ getImageDataMs });
-    if (getImageDataMs >= 16) {
-      patchPlatePreviewFrame({ longTasks: [{ label: 'getImageData', ms: getImageDataMs }] });
-    }
-  }
 
   const pad = 8;
   const minX = Math.max(0, Math.min(...boxes.map((b) => b.x)) - pad);
@@ -1160,15 +1073,7 @@ async function scanFrameForPlateWithCNNFromBoxes(
   const maxX = Math.min(origW, Math.max(...boxes.map((b) => b.x + b.w)) + pad);
   const maxY = Math.min(origH, Math.max(...boxes.map((b) => b.y + b.h)) + pad);
 
-  const sharpStart = isPlatePreviewProfiling() ? performance.now() : 0;
   const sharpness = measureRegionSharpness(imageData, origW, origH, minX, minY, maxX, maxY);
-  if (isPlatePreviewProfiling()) {
-    const sharpnessMs = performance.now() - sharpStart;
-    patchPlatePreviewFrame({ sharpnessMs });
-    if (sharpnessMs >= 16) {
-      patchPlatePreviewFrame({ longTasks: [{ label: 'sharpness', ms: sharpnessMs }] });
-    }
-  }
 
   const perfContext = options?.perfContext;
   const cnnStart = perfContext === 'post' ? performance.now() : 0;
@@ -1184,20 +1089,12 @@ async function scanFrameForPlateWithCNNFromBoxes(
     recordLastPreviewFrame(yoloMs, cnnMs);
   }
 
-  const gateStart = isPlatePreviewProfiling() ? performance.now() : 0;
   const { passes, reason } = evaluatePlateCaptureGate(
     charConfidences,
     avgConfidence,
     plateText,
     sharpness,
   );
-  if (isPlatePreviewProfiling()) {
-    const gateMs = performance.now() - gateStart;
-    patchPlatePreviewFrame({ gateMs });
-    if (gateMs >= 16) {
-      patchPlatePreviewFrame({ longTasks: [{ label: 'gate', ms: gateMs }] });
-    }
-  }
 
   return {
     boxes,
@@ -1246,15 +1143,10 @@ export async function scanPlateFrameForRealtime(
   previewText?: string;
   previewConfidence?: number;
 }> {
-  const yoloStart = import.meta.env.DEV ? performance.now() : 0;
   const boxes = await detectPlateCharBoxesOnCanvas(frameCanvas);
-  const yoloMs = import.meta.env.DEV ? performance.now() - yoloStart : 0;
   const hadSevenBoxes = boxes.length >= PLATE_CAPTURE_THRESHOLDS.targetCharCount;
 
   if (!hadSevenBoxes) {
-    if (import.meta.env.DEV) {
-      patchPlatePreviewFrame({ frameType: 'yolo-only' });
-    }
     return { boxes, ready: false };
   }
 
@@ -1262,9 +1154,6 @@ export async function scanPlateFrameForRealtime(
   const dueForCnn = now - platePreviewCache.lastCnnAt >= PLATE_CNN_PREVIEW_INTERVAL_MS;
 
   if (!dueForCnn) {
-    if (import.meta.env.DEV) {
-      patchPlatePreviewFrame({ frameType: 'cnn-skipped' });
-    }
     return {
       boxes,
       ready: platePreviewCache.passesGate,
@@ -1273,12 +1162,9 @@ export async function scanPlateFrameForRealtime(
     };
   }
 
-  const result = await scanFrameForPlateWithCNNFromBoxes(frameCanvas, boxes, yoloMs, {
+  const result = await scanFrameForPlateWithCNNFromBoxes(frameCanvas, boxes, 0, {
     perfContext: 'preview',
   });
-  if (import.meta.env.DEV) {
-    patchPlatePreviewFrame({ frameType: 'cnn-full' });
-  }
   platePreviewCache = {
     previewText: result.plateText || undefined,
     previewConfidence: result.avgConfidence > 0 ? result.avgConfidence : undefined,
