@@ -3,6 +3,7 @@
 
 -- Tabela public.leiloes (referência)
 --   id int8 PK (identity/serial), nome text NOT NULL, created_at timestamptz default now()
+--   tipo_laudo text NOT NULL DEFAULT 'completo' CHECK (tipo_laudo IN ('completo', 'simplificado'))
 --   updated_at timestamptz NOT NULL default now()  -- trigger BEFORE UPDATE atualiza (ver migrations/)
 --   created_by text NULL  -- nome exibido (rastreabilidade); futuro: created_by_user_id uuid NULL
 --   Policies: permitir INSERT/SELECT para anon (ou authenticated), conforme seu modelo.

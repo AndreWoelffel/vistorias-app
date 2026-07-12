@@ -24,6 +24,7 @@ import { syncLeilaoToCloud } from '@/services/leilaoService';
 import { syncInspectionFromLocal, syncVistoriaUpdateToCloud } from '@/services/inspectionService';
 import { deleteVistoriaFotosBeforeVistoriaDelete } from '@/services/vistoriaFotoService';
 import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict';
+import { normalizeTipoLaudo } from '@/lib/tipoLaudo';
 
 export const MAX_SYNC_RETRIES = 5;
 /** Máximo de espera antes de reprocessar um item com falhas anteriores (ms). */
@@ -230,7 +231,7 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
 
       const { data: serverRow, error: fetchErr } = await supabase
         .from('leiloes')
-        .select('updated_at, nome')
+        .select('updated_at, nome, tipo_laudo')
         .eq('id', leilao.supabaseId)
         .maybeSingle();
 
@@ -238,6 +239,10 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
 
       const serverMs = supabaseTimestampToMs((serverRow as { updated_at?: string | null } | null)?.updated_at);
       const localMs = leilao.updatedAt ?? (leilao.createdAt ? new Date(leilao.createdAt).getTime() : 0);
+      const localTipo = normalizeTipoLaudo(leilao.tipoLaudo);
+      const serverTipo = normalizeTipoLaudo(
+        (serverRow as { tipo_laudo?: unknown } | null)?.tipo_laudo,
+      );
 
       if (serverRow && serverMs !== localMs) {
         logSyncConflict({
@@ -248,19 +253,28 @@ async function processOneItem(item: SyncQueueItem): Promise<ItemResult> {
 
       if (serverMs > localMs) {
         const nomeSrv = String((serverRow as { nome?: string } | null)?.nome ?? '').trim();
-        await updateLeilao(localId, { nome: nomeSrv || leilao.nome, updatedAt: serverMs });
+        await updateLeilao(localId, {
+          nome: nomeSrv || leilao.nome,
+          tipoLaudo: serverTipo,
+          updatedAt: serverMs,
+        });
         return 'done';
       }
 
       if (serverMs === localMs && serverRow) {
         const nomeSrv = String((serverRow as { nome?: string }).nome ?? '').trim();
-        if (nomeSrv === leilao.nome.trim()) {
-          await updateLeilao(localId, { updatedAt: serverMs });
+        if (nomeSrv === leilao.nome.trim() && serverTipo === localTipo) {
+          await updateLeilao(localId, { updatedAt: serverMs, tipoLaudo: serverTipo });
           return 'done';
         }
       }
 
-      const { data: after, error } = await supabase.from('leiloes').update({ nome: leilao.nome.trim() }).eq('id', leilao.supabaseId).select('updated_at').maybeSingle();
+      const { data: after, error } = await supabase
+        .from('leiloes')
+        .update({ nome: leilao.nome.trim(), tipo_laudo: localTipo })
+        .eq('id', leilao.supabaseId)
+        .select('updated_at')
+        .maybeSingle();
       if (error) return 'fail';
 
       const newMs = supabaseTimestampToMs((after as { updated_at?: string | null } | null)?.updated_at);

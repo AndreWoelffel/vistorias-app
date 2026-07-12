@@ -15,6 +15,7 @@ import {
   XCircle,
   X,
   Trash2,
+  Ban,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -50,6 +51,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { processarPlaca } from '@/lib/plateValidator';
 import { beginPlateCapturePerf, logPlateCapturePerf } from '@/lib/plateOcrPerf';
+import { PLACA_SEM_PLACA, isSemPlaca } from '@/lib/placaSemPlaca';
 
 type Step = 'placa' | 'numero' | 'fotos';
 type CameraMode = 'placa' | 'numero' | 'chassi' | 'motor' | 'geral' | null;
@@ -404,7 +406,9 @@ export default function NewInspection() {
       const finalPlacaUpper = placa.toUpperCase();
 
       const isHardExample =
-        placaOriginalIA !== null && placaOriginalIA !== finalPlacaUpper;
+        !isSemPlaca(finalPlacaUpper) &&
+        placaOriginalIA !== null &&
+        placaOriginalIA !== finalPlacaUpper;
       const isYoloError =
         isHardExample && placaOriginalIA !== null && placaOriginalIA.length !== 7;
       const isCnnError =
@@ -690,7 +694,7 @@ export default function NewInspection() {
                   type="button" 
                   onClick={() => setCameraMode('placa')} 
                   className="w-full min-h-12 h-12 gap-2 text-base font-semibold shadow-sm" 
-                  disabled={ocrLoading}
+                  disabled={ocrLoading || isSemPlaca(placa)}
                 >
                   <Camera className="h-5 w-5" />
                   Tirar fotos da placa
@@ -783,15 +787,59 @@ export default function NewInspection() {
                   <label className="block text-sm font-semibold text-foreground/80 mb-1">Placa</label>
                   <Input
                     value={placa}
-                    onChange={(e) => { setPlaca(e.target.value.toUpperCase().slice(0, 7)); setOqWarning(null); }}
+                    onChange={(e) => {
+                      const next = e.target.value.toUpperCase();
+                      if (isSemPlaca(next)) {
+                        setPlaca(PLACA_SEM_PLACA);
+                      } else {
+                        setPlaca(next.replace(/[^A-Z0-9]/g, '').slice(0, 7));
+                      }
+                      setOqWarning(null);
+                    }}
                     placeholder={ocrLoading ? 'Processando…' : 'Ex.: ABC1D23'}
-                    maxLength={7}
+                    maxLength={isSemPlaca(placa) ? PLACA_SEM_PLACA.length : 7}
+                    readOnly={isSemPlaca(placa)}
                     autoCapitalize="characters"
                     enterKeyHint="next"
                     className="h-14 text-center text-xl font-black tracking-widest uppercase bg-background shadow-inner"
                   />
+                  {isSemPlaca(placa) && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="mt-2 w-full text-xs text-muted-foreground"
+                      onClick={() => {
+                        setPlaca('');
+                        setFotoPlaca(null);
+                      }}
+                    >
+                      Informar placa normalmente
+                    </Button>
+                  )}
                 </div>
               </div>
+
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setPlaca(PLACA_SEM_PLACA);
+                  setFotoPlaca(null);
+                  setPlacaOriginalIA(null);
+                  setOcrConfidence(null);
+                  setOqWarning(null);
+                  setGeoCorrections([]);
+                  setDebugImage(null);
+                  setCharDebugImages([]);
+                  setStep('numero');
+                }}
+                className="w-full min-h-12 h-12 gap-2 text-base font-semibold"
+                disabled={ocrLoading}
+              >
+                <Ban className="h-5 w-5" />
+                Veículo sem placa
+              </Button>
             </div>
           )}
 
@@ -1083,7 +1131,9 @@ export default function NewInspection() {
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-border/40">
                   <span className="text-muted-foreground">Placa</span>
-                  <span className="font-black text-primary text-lg tracking-widest">{placa}</span>
+                  <span className={`font-black text-primary text-lg ${isSemPlaca(placa) ? 'tracking-normal' : 'tracking-widest'}`}>
+                    {isSemPlaca(placa) ? 'Sem Placa' : placa}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center py-1 border-b border-border/40">
                   <span className="text-muted-foreground">Nº Adesivo</span>

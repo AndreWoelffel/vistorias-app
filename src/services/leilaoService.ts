@@ -17,6 +17,12 @@ import {
 } from "@/lib/db";
 import { assertCanDeleteLeilao, getCreatedBySnapshot } from "@/services/currentUserService";
 import { supabaseTimestampToMs } from "@/services/syncConflict";
+import { normalizeTipoLaudo, type TipoLaudo } from "@/lib/tipoLaudo";
+
+export type UpdateLeilaoPatch = {
+  nome: string;
+  tipoLaudo: TipoLaudo;
+};
 
 export type CreateLeilaoResult = {
   leilao: Leilao;
@@ -106,8 +112,11 @@ async function findDuplicateNome(trimmed: string, excludeId?: number): Promise<L
 /**
  * Offline-first: grava no IndexedDB, enfileira sync e tenta enviar na hora.
  */
-export async function updateLeilaoNome(localId: number, nome: string): Promise<UpdateLeilaoResult> {
-  const trimmed = nome.trim();
+export async function updateLeilaoFields(
+  localId: number,
+  patch: UpdateLeilaoPatch,
+): Promise<UpdateLeilaoResult> {
+  const trimmed = patch.nome.trim();
   if (!trimmed) {
     throw new Error("Informe o nome do leilão.");
   }
@@ -122,7 +131,9 @@ export async function updateLeilaoNome(localId: number, nome: string): Promise<U
     throw new Error("Já existe um leilão com este nome.");
   }
 
-  await updateLeilao(localId, { nome: trimmed, updatedAt: Date.now() });
+  const tipoLaudo = normalizeTipoLaudo(patch.tipoLaudo);
+
+  await updateLeilao(localId, { nome: trimmed, tipoLaudo, updatedAt: Date.now() });
 
   if (leilao.supabaseId != null) {
     await addToQueue({
@@ -139,7 +150,19 @@ export async function updateLeilaoNome(localId: number, nome: string): Promise<U
   return { ok: true, cloudOk };
 }
 
-export async function createLeilao(nome: string): Promise<CreateLeilaoResult> {
+/** @deprecated Use updateLeilaoFields — mantido para compatibilidade interna. */
+export async function updateLeilaoNome(localId: number, nome: string): Promise<UpdateLeilaoResult> {
+  const leilao = await getLeilaoById(localId);
+  return updateLeilaoFields(localId, {
+    nome,
+    tipoLaudo: normalizeTipoLaudo(leilao?.tipoLaudo),
+  });
+}
+
+export async function createLeilao(
+  nome: string,
+  tipoLaudo: TipoLaudo = "completo",
+): Promise<CreateLeilaoResult> {
   const trimmed = nome.trim();
   if (!trimmed) {
     throw new Error("Informe o nome do leilão.");
@@ -151,10 +174,12 @@ export async function createLeilao(nome: string): Promise<CreateLeilaoResult> {
   }
 
   const createdSnap = await getCreatedBySnapshot();
+  const normalizedTipo = normalizeTipoLaudo(tipoLaudo);
 
   const nowMs = Date.now();
   const localKey = await addLeilao({
     nome: trimmed,
+    tipoLaudo: normalizedTipo,
     createdAt: new Date(),
     supabaseId: null,
     createdBy: createdSnap.displayName,
@@ -203,9 +228,10 @@ export async function syncLeilaoToCloud(localId: number): Promise<SyncLeilaoResu
     .from("leiloes")
     .insert({
       nome: leilao.nome.trim(),
+      tipo_laudo: normalizeTipoLaudo(leilao.tipoLaudo),
       created_by: createdBy,
     })
-    .select("id, nome, created_at, updated_at")
+    .select("id, nome, tipo_laudo, created_at, updated_at")
     .maybeSingle();
 
   if (error) {
@@ -222,6 +248,7 @@ export async function syncLeilaoToCloud(localId: number): Promise<SyncLeilaoResu
   const updatedAt = supabaseTimestampToMs(row.updated_at);
   await updateLeilao(localId, {
     supabaseId: sid,
+    tipoLaudo: normalizeTipoLaudo((data as { tipo_laudo?: unknown }).tipo_laudo ?? leilao.tipoLaudo),
     createdBy,
     createdByUserId: leilao.createdByUserId ?? (snap.userId != null ? String(snap.userId) : null),
     updatedAt: updatedAt > 0 ? updatedAt : Date.now(),

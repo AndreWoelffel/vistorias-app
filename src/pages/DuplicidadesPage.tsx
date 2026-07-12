@@ -12,6 +12,7 @@ import {
 } from '@/lib/db';
 import { duplicateTypeShortLabel, duplicateUserMessage } from '@/services/inspectionService';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
+import { isSemPlaca } from '@/lib/placaSemPlaca';
 import { cn } from '@/lib/utils';
 
 function normPlaca(p: string): string {
@@ -29,9 +30,12 @@ function clusterConflicts(rows: (Vistoria & { id: number })[]): (Vistoria & { id
     for (let j = i + 1; j < rows.length; j++) {
       const a = rows[i];
       const b = rows[j];
-      const sp = normPlaca(a.placa) === normPlaca(b.placa);
+      const samePlaca =
+        !isSemPlaca(a.placa) &&
+        !isSemPlaca(b.placa) &&
+        normPlaca(a.placa) === normPlaca(b.placa);
       const sn = normNum(a.numeroVistoria) === normNum(b.numeroVistoria);
-      if (sp || sn) {
+      if (samePlaca || sn) {
         if (!adj.has(a.id)) adj.set(a.id, new Set());
         if (!adj.has(b.id)) adj.set(b.id, new Set());
         adj.get(a.id)!.add(b.id);

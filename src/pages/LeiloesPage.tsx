@@ -18,6 +18,13 @@ import {
 } from "@/services/leilaoService";
 import type { Leilao } from "@/lib/db";
 import {
+  normalizeTipoLaudo,
+  tipoLaudoBadgeLabel,
+  tipoLaudoOptionLabel,
+  TIPO_LAUDO_OPTIONS,
+  type TipoLaudo,
+} from "@/lib/tipoLaudo";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -63,7 +70,7 @@ export default function LeiloesPage() {
     loading,
     refresh,
     createLeilao,
-    updateLeilaoNome,
+    updateLeilao,
     deleteLeilao,
     syncLeilaoToCloud,
   } = useLeiloes();
@@ -116,11 +123,13 @@ export default function LeiloesPage() {
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [nome, setNome] = useState("");
+  const [tipoLaudo, setTipoLaudo] = useState<TipoLaudo>("completo");
   const [saving, setSaving] = useState(false);
 
   const [editOpen, setEditOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [editNome, setEditNome] = useState("");
+  const [editTipoLaudo, setEditTipoLaudo] = useState<TipoLaudo>("completo");
   const [savingEdit, setSavingEdit] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
@@ -139,7 +148,7 @@ export default function LeiloesPage() {
     }
     setSaving(true);
     try {
-      const { cloudOk, error } = await createLeilao(trimmed);
+      const { cloudOk, error } = await createLeilao(trimmed, tipoLaudo);
       if (cloudOk) {
         toast({ title: "Leilão criado", description: "Sincronizado com o Supabase." });
       } else {
@@ -149,6 +158,7 @@ export default function LeiloesPage() {
         });
       }
       setNome("");
+      setTipoLaudo("completo");
       setDialogOpen(false);
     } catch (err) {
       console.error(err);
@@ -166,6 +176,7 @@ export default function LeiloesPage() {
     if (l.id == null) return;
     setEditId(l.id);
     setEditNome(l.nome);
+    setEditTipoLaudo(normalizeTipoLaudo(l.tipoLaudo));
     setEditOpen(true);
   };
 
@@ -179,7 +190,7 @@ export default function LeiloesPage() {
     }
     setSavingEdit(true);
     try {
-      const result = await updateLeilaoNome(editId, trimmed);
+      const result = await updateLeilao(editId, { nome: trimmed, tipoLaudo: editTipoLaudo });
       if (!result.ok) {
         toast({
           title: "Não foi possível atualizar",
@@ -191,8 +202,8 @@ export default function LeiloesPage() {
       toast({
         title: "Leilão atualizado",
         description: result.cloudOk
-          ? "Salvo no aparelho e no Supabase."
-          : "Salvo no aparelho (após sincronizar, o nome estará na nuvem).",
+          ? "Nome e tipo de laudo salvos no aparelho e no Supabase."
+          : "Salvo no aparelho (após sincronizar, estará na nuvem).",
       });
       setEditOpen(false);
       setEditId(null);
@@ -302,6 +313,7 @@ export default function LeiloesPage() {
             {safeList.map((l) => {
               const vid = l.id as number;
               const nVis = vistoriaCounts[vid] ?? 0;
+              const laudoTipo = normalizeTipoLaudo(l.tipoLaudo);
               return (
                 <li
                   key={l.id}
@@ -316,6 +328,12 @@ export default function LeiloesPage() {
                         </span>
                       </p>
                       <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] font-semibold border-border/70"
+                        >
+                          {tipoLaudoBadgeLabel(laudoTipo)}
+                        </Badge>
                         {isSynced(l) ? (
                           <Badge variant="default" className="text-[10px] font-semibold bg-primary/20 text-primary hover:bg-primary/30">
                             Sincronizado
@@ -467,16 +485,36 @@ export default function LeiloesPage() {
                 O nome será salvo no aparelho e enviado ao Supabase quando possível.
               </DialogDescription>
             </DialogHeader>
-            <div className="py-4">
-              <label className="text-xs font-semibold text-muted-foreground">Nome</label>
-              <Input
-                value={nome}
-                onChange={(e) => setNome(e.target.value)}
-                placeholder="Ex.: Leilão SP — Fevereiro 2026"
-                className="mt-1 h-11 bg-background"
-                autoFocus
-                disabled={saving}
-              />
+            <div className="py-4 space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Nome</label>
+                <Input
+                  value={nome}
+                  onChange={(e) => setNome(e.target.value)}
+                  placeholder="Ex.: Leilão SP — Fevereiro 2026"
+                  className="mt-1 h-11 bg-background"
+                  autoFocus
+                  disabled={saving}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Tipo de laudo</label>
+                <select
+                  value={tipoLaudo}
+                  onChange={(e) => setTipoLaudo(normalizeTipoLaudo(e.target.value))}
+                  disabled={saving}
+                  className="mt-1 w-full rounded-md border border-border/80 bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-60"
+                >
+                  {TIPO_LAUDO_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {tipoLaudoOptionLabel(opt)}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  Define o modelo Excel usado pelo Command Center ao gerar laudos deste leilão.
+                </p>
+              </div>
             </div>
             <DialogFooter className="gap-2">
               <Button type="button" variant="secondary" className="font-medium" onClick={() => setDialogOpen(false)} disabled={saving}>
@@ -497,18 +535,38 @@ export default function LeiloesPage() {
             <DialogHeader>
               <DialogTitle>Editar leilão</DialogTitle>
               <DialogDescription>
-                Altera o nome no aparelho e no Supabase quando o leilão estiver sincronizado.
+                Altera o nome e o tipo de laudo no aparelho e no Supabase quando o leilão estiver sincronizado.
               </DialogDescription>
             </DialogHeader>
-            <div className="py-4">
-              <label className="text-xs font-semibold text-muted-foreground">Nome</label>
-              <Input
-                value={editNome}
-                onChange={(e) => setEditNome(e.target.value)}
-                className="mt-1 h-11 bg-background"
-                autoFocus
-                disabled={savingEdit}
-              />
+            <div className="py-4 space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Nome</label>
+                <Input
+                  value={editNome}
+                  onChange={(e) => setEditNome(e.target.value)}
+                  className="mt-1 h-11 bg-background"
+                  autoFocus
+                  disabled={savingEdit}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-muted-foreground">Tipo de laudo</label>
+                <select
+                  value={editTipoLaudo}
+                  onChange={(e) => setEditTipoLaudo(normalizeTipoLaudo(e.target.value))}
+                  disabled={savingEdit}
+                  className="mt-1 w-full rounded-md border border-border/80 bg-background px-3 py-2.5 text-sm font-medium text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:opacity-60"
+                >
+                  {TIPO_LAUDO_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {tipoLaudoOptionLabel(opt)}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  Pode ser alterado mesmo com vistorias existentes. O Command Center usa este valor na geração de laudos.
+                </p>
+              </div>
             </div>
             <DialogFooter className="gap-2">
               <Button type="button" variant="secondary" className="font-medium" onClick={() => { setEditOpen(false); setEditId(null); }} disabled={savingEdit}>

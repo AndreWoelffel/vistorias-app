@@ -11,6 +11,7 @@ import {
   type VistoriaDuplicateInfo,
   type VistoriaDuplicateType,
 } from '@/lib/db';
+import { isSemPlaca } from '@/lib/placaSemPlaca';
 
 function duplicateMessage(type: VistoriaDuplicateType): string {
   switch (type) {
@@ -67,8 +68,11 @@ export async function recalculateDuplicateVistoriasForLeilao(leilaoId: number): 
   for (const v of withIds) {
     const pk = normPlaca(v.placa);
     const nk = normNumVistoria(v.numeroVistoria);
-    if (!placaToIds.has(pk)) placaToIds.set(pk, []);
-    placaToIds.get(pk)!.push(v.id);
+    // "Sem Placa" não gera grupo de duplicidade por placa (vários veículos sem placa são válidos).
+    if (!isSemPlaca(v.placa)) {
+      if (!placaToIds.has(pk)) placaToIds.set(pk, []);
+      placaToIds.get(pk)!.push(v.id);
+    }
     if (!numToIds.has(nk)) numToIds.set(nk, []);
     numToIds.get(nk)!.push(v.id);
   }

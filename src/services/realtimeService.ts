@@ -21,6 +21,7 @@ import {
   applyVistoriaInsert,
   applyVistoriaUpdate,
 } from '@/services/vistoriaCloudMerge';
+import { normalizeTipoLaudo } from '@/lib/tipoLaudo';
 import type { RealtimeChannel, RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 
 const realtimeUiListeners = new Set<() => void>();
@@ -47,6 +48,7 @@ function mapRecordToLeilaoForMerge(rec: Record<string, unknown>): Leilao & { id:
   return {
     id,
     nome: String(rec.nome ?? '').trim() || '(sem nome)',
+    tipoLaudo: normalizeTipoLaudo(rec.tipo_laudo),
     supabaseId: id,
     createdAt: rec.created_at ? new Date(String(rec.created_at)) : new Date(),
     updatedAt: updatedAt !== undefined && updatedAt > 0 ? updatedAt : undefined,

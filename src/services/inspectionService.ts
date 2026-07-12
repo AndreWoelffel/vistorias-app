@@ -23,6 +23,8 @@ import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict'
 import { mergeVistoriasFromCloudRows } from '@/services/vistoriaCloudMerge';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { syncVistoriaFotosToCloud } from '@/services/vistoriaFotoService';
+import { normalizeTipoLaudo } from '@/lib/tipoLaudo';
+import { isSemPlaca } from '@/lib/placaSemPlaca';
 
 export { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 
@@ -54,7 +56,11 @@ async function ensureLeilaoSupabaseId(localLeilaoId: number): Promise<number | n
 
   const { data, error } = await supabase
     .from('leiloes')
-    .insert({ nome: leilao.nome, created_by: createdBy })
+    .insert({
+      nome: leilao.nome,
+      created_by: createdBy,
+      tipo_laudo: normalizeTipoLaudo(leilao.tipoLaudo),
+    })
     .select('id, updated_at')
     .maybeSingle();
 
@@ -209,11 +215,13 @@ export async function analyzeLocalDuplicateVistoria(
   const list = await getVistoriasByLeilao(leilaoId, { includePendingCloudDelete: true });
   const p = normPlaca(placa);
   const n = normNumVistoria(numeroVistoria);
+  /** Vários veículos sem placa no mesmo leilão são válidos — só o número do adesivo deve ser único. */
+  const skipPlacaDup = isSemPlaca(placa);
   let conflictP = false;
   let conflictN = false;
   for (const v of list) {
     if (excludeLocalId != null && v.id === excludeLocalId) continue;
-    if (normPlaca(v.placa) === p) conflictP = true;
+    if (!skipPlacaDup && !isSemPlaca(v.placa) && normPlaca(v.placa) === p) conflictP = true;
     if (normNumVistoria(v.numeroVistoria) === n) conflictN = true;
   }
   if (!conflictP && !conflictN) return { duplicate: false };
@@ -292,8 +300,9 @@ export async function assertNoDuplicateVistoriaForSync(opts: {
   const n = normNumVistoria(opts.numeroVistoria);
   const extEx = opts.excludeExternalId?.trim() || '';
   const cloudEx = opts.excludeCloudVistoriaId?.trim() || '';
+  const skipPlacaDup = isSemPlaca(opts.placa);
 
-  const rp = await findCloudDuplicateRow(fk, 'placa', p, extEx, cloudEx);
+  const rp = skipPlacaDup ? null : await findCloudDuplicateRow(fk, 'placa', p, extEx, cloudEx);
   const rn = await findCloudDuplicateRow(fk, 'num_vistoria', n, extEx, cloudEx);
 
   const conflictPlaca = rp != null && !cloudRowIsSelf(rp, extEx, cloudEx);

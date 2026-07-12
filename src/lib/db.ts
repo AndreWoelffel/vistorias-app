@@ -1,11 +1,15 @@
 import { openDB, type IDBPDatabase } from 'idb';
+import { type TipoLaudo, normalizeTipoLaudo } from '@/lib/tipoLaudo';
 import { generateUuid, isValidUuid } from '@/lib/uuid';
 
 export { isValidUuid } from '@/lib/uuid';
+export type { TipoLaudo } from '@/lib/tipoLaudo';
 
 export interface Leilao {
   id?: number;
   nome: string;
+  /** Modelo Excel do Command Center — espelha `tipo_laudo` em public.leiloes. */
+  tipoLaudo?: TipoLaudo;
   createdAt?: Date;
   /** Id em public.leiloes no Supabase (FK em vistorias). null = ainda não existe na nuvem */
   supabaseId?: number | null;
@@ -284,6 +288,7 @@ export async function mergeLeilaoFromCloud(cloud: Leilao & { id: number }): Prom
     await db.put('leiloes', {
       ...existing,
       nome: cloud.nome,
+      tipoLaudo: normalizeTipoLaudo(cloud.tipoLaudo ?? existing.tipoLaudo),
       supabaseId: cloud.id,
       createdBy: cloud.createdBy ?? existing.createdBy,
       createdByUserId: cloud.createdByUserId ?? existing.createdByUserId,
@@ -296,6 +301,7 @@ export async function mergeLeilaoFromCloud(cloud: Leilao & { id: number }): Prom
   }
   await db.put('leiloes', {
     ...cloud,
+    tipoLaudo: normalizeTipoLaudo(cloud.tipoLaudo),
     supabaseId: cloud.id,
     createdAt: cloud.createdAt ?? new Date(),
     updatedAt: cloud.updatedAt,

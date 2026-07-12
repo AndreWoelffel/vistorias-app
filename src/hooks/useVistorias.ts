@@ -8,19 +8,23 @@ import {
 } from '@/lib/db';
 import {
   createLeilao as createLeilaoApi,
-  updateLeilaoNome as updateLeilaoNomeApi,
+  updateLeilaoFields as updateLeilaoFieldsApi,
   deleteLeilao as deleteLeilaoApi,
   syncLeilaoToCloud as syncLeilaoToCloudApi,
+  type UpdateLeilaoPatch,
 } from '@/services/leilaoService';
 import { supabase } from '@/services/supabaseClient';
 import { supabaseTimestampToMs } from '@/services/syncConflict';
 import { ensureRealtimeStarted, subscribeRealtimeUi } from '@/services/realtimeService';
+import { normalizeTipoLaudo, type TipoLaudo } from '@/lib/tipoLaudo';
 
 export { addVistoria, updateVistoria, deleteVistoria, getVistoriaById } from '@/lib/db';
+export type { UpdateLeilaoPatch, TipoLaudo };
 
 type SupabaseLeilaoRow = {
   id: number;
   nome: string;
+  tipo_laudo?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   created_by?: string | null;
@@ -32,6 +36,7 @@ function mapSupabaseRowToLeilao(row: SupabaseLeilaoRow): Leilao & { id: number }
   return {
     id,
     nome: String(row.nome ?? '').trim() || '(sem nome)',
+    tipoLaudo: normalizeTipoLaudo(row.tipo_laudo),
     supabaseId: id,
     createdAt: row.created_at ? new Date(row.created_at) : undefined,
     updatedAt: updatedAt !== undefined && updatedAt > 0 ? updatedAt : undefined,
@@ -61,6 +66,7 @@ function buildMergedLeiloesList(
       result.push({
         ...local,
         nome: c.nome,
+        tipoLaudo: normalizeTipoLaudo(c.tipoLaudo ?? local.tipoLaudo),
         supabaseId: c.id,
         createdBy: c.createdBy ?? local.createdBy,
         updatedAt: c.updatedAt ?? local.updatedAt,
@@ -92,7 +98,7 @@ export function useLeiloes() {
     try {
       const { data, error } = await supabase
         .from('leiloes')
-        .select('*')
+        .select('id, nome, tipo_laudo, created_at, updated_at, created_by')
         .order('nome', { ascending: true });
 
       const rows = (data ?? []) as SupabaseLeilaoRow[];
@@ -147,17 +153,17 @@ export function useLeiloes() {
   }, [refresh]);
 
   const createLeilao = useCallback(
-    async (nome: string) => {
-      const result = await createLeilaoApi(nome);
+    async (nome: string, tipoLaudo: TipoLaudo = 'completo') => {
+      const result = await createLeilaoApi(nome, tipoLaudo);
       await refresh();
       return result;
     },
     [refresh],
   );
 
-  const updateLeilaoNome = useCallback(
-    async (localId: number, nome: string) => {
-      const result = await updateLeilaoNomeApi(localId, nome);
+  const updateLeilao = useCallback(
+    async (localId: number, patch: UpdateLeilaoPatch) => {
+      const result = await updateLeilaoFieldsApi(localId, patch);
       if (result.ok) await refresh();
       return result;
     },
@@ -187,7 +193,7 @@ export function useLeiloes() {
     loading,
     refresh,
     createLeilao,
-    updateLeilaoNome,
+    updateLeilao,
     deleteLeilao,
     syncLeilaoToCloud,
   };

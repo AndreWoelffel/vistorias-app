@@ -13,6 +13,7 @@ import {
   Eye,
   Trash2,
   XCircle,
+  Ban,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -23,6 +24,7 @@ import { addToQueue, removeVistoriaQueueItems, normalizeVistoriaStatusSync } fro
 import { duplicateUserMessage } from '@/services/inspectionService';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { compressImage } from '@/lib/imageUtils';
+import { PLACA_SEM_PLACA, isSemPlaca } from '@/lib/placaSemPlaca';
 import { toast } from '@/hooks/use-toast';
 import type { Vistoria } from '@/lib/db';
 
@@ -203,7 +205,7 @@ export default function EditInspection() {
       if (hasMotor && fotoMotor) allFotos.push(fotoMotor);
 
       await updateVistoria(vistoriaId, {
-        placa: placa.toUpperCase(),
+        placa: isSemPlaca(placa) ? PLACA_SEM_PLACA : placa.toUpperCase(),
         numeroVistoria: numero,
         vistoriador,
         fotos: allFotos,
@@ -429,11 +431,48 @@ export default function EditInspection() {
             <label className="block text-xs font-semibold text-muted-foreground mb-1">Placa</label>
             <Input
               value={placa}
-              onChange={(e) => setPlaca(e.target.value.toUpperCase().slice(0, 7))}
-              maxLength={7}
+              onChange={(e) => {
+                const next = e.target.value.toUpperCase();
+                if (isSemPlaca(next)) {
+                  setPlaca(PLACA_SEM_PLACA);
+                } else {
+                  setPlaca(next.replace(/[^A-Z0-9]/g, '').slice(0, 7));
+                }
+              }}
+              maxLength={isSemPlaca(placa) ? PLACA_SEM_PLACA.length : 7}
+              readOnly={isSemPlaca(placa)}
               enterKeyHint="next"
               className="h-14 text-center text-xl font-black tracking-widest uppercase bg-background shadow-inner"
             />
+            <div className="mt-2 flex flex-col gap-2">
+              <Button
+                type="button"
+                variant={isSemPlaca(placa) ? 'default' : 'outline'}
+                size="sm"
+                className="w-full h-10 gap-2"
+                onClick={() => {
+                  setPlaca(PLACA_SEM_PLACA);
+                  setFotoPlaca(null);
+                }}
+              >
+                <Ban className="h-4 w-4" />
+                {isSemPlaca(placa) ? 'Sem placa (selecionado)' : 'Veículo sem placa'}
+              </Button>
+              {isSemPlaca(placa) && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="w-full text-xs text-muted-foreground"
+                  onClick={() => {
+                    setPlaca('');
+                    setFotoPlaca(null);
+                  }}
+                >
+                  Informar placa normalmente
+                </Button>
+              )}
+            </div>
           </div>
           <div>
             <label className="block text-xs font-semibold text-muted-foreground mb-1">Número (5 dígitos)</label>
