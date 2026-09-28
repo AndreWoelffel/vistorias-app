@@ -2,6 +2,12 @@
  * Sync de fotos tipadas para public.vistorias_fotos + Storage.
  * Tipos inferidos dos prefixos locais: PLACA_, ADESIVO_, CHASSI_, MOTOR_, FOTO_.
  */
+import {
+  parseOrientationFromFileName,
+  stripOrientationSuffix,
+  type OrientacaoAngulo,
+  type OrientacaoFonte,
+} from '@/lib/imageOrientation';
 import { sha256HexFromBlob } from '@/lib/sha256';
 import { supabase } from '@/services/supabaseClient';
 
@@ -15,6 +21,9 @@ export type ParsedLocalFoto = {
   blob: Blob;
   arquivoOriginal: string;
   mimeType: string;
+  /** Rotação já gravada nos pixels pelo alinhador; null em foto legada. */
+  rotacaoAplicada: OrientacaoAngulo | null;
+  orientacaoFonte: OrientacaoFonte | null;
 };
 
 type CloudFotoRow = {
@@ -38,6 +47,49 @@ function logFotoSyncError(message: string, detail?: unknown): void {
   console.error(`[Fotos] ${message}`, detail ?? '');
 }
 
+/**
+ * O deploy do app e a migration do banco não são atômicos: o vistoriador pode
+ * receber esta versão antes de `0001_ia_leituras.sql` ter sido aplicada. Sem o
+ * fallback abaixo, o upsert falharia com PGRST204 e derrubaria o sync de fotos
+ * inteiro — regressão bem pior do que ficar sem o metadado de orientação.
+ */
+let colunasOrientacaoDisponiveis = true;
+
+function ehErroDeColunaAusente(message: string | undefined): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+  return (
+    m.includes('rotacao_aplicada') ||
+    m.includes('orientacao_fonte') ||
+    m.includes('pgrst204')
+  );
+}
+
+async function upsertFotoRow(row: Record<string, unknown>): Promise<string | null> {
+  const enviar = async (payload: Record<string, unknown>) => {
+    const { error } = await supabase
+      .from('vistorias_fotos')
+      .upsert(payload, { onConflict: 'vistoria_id,tipo,ordem' });
+    return error?.message ?? null;
+  };
+
+  if (colunasOrientacaoDisponiveis) {
+    const erro = await enviar(row);
+    if (!erro) return null;
+    if (!ehErroDeColunaAusente(erro)) return erro;
+
+    colunasOrientacaoDisponiveis = false;
+    logFotoSyncError(
+      'Colunas de orientação ausentes — aplique supabase/migrations/0001_ia_leituras.sql. ' +
+        'Seguindo sem o metadado.',
+      erro,
+    );
+  }
+
+  const { rotacao_aplicada: _r, orientacao_fonte: _f, ...semOrientacao } = row;
+  return enviar(semOrientacao);
+}
+
 function fotoKey(tipo: VistoriaFotoTipo, ordem: number): string {
   return `${tipo}:${ordem}`;
 }
@@ -59,11 +111,21 @@ export function parseLocalFotos(fotos: Blob[] | undefined | null): ParsedLocalFo
   for (const blob of fotos) {
     if (!blob || blob.size <= 0) continue;
     const file = blob as File;
-    const arquivoOriginal = (file.name && String(file.name).trim()) || `foto_${Date.now()}.jpg`;
+    const nomeLocal = (file.name && String(file.name).trim()) || `foto_${Date.now()}.jpg`;
     const mimeType = blob.type?.trim() || 'image/jpeg';
-    const tipo = inferTipoFromFileName(arquivoOriginal);
+    const tipo = inferTipoFromFileName(nomeLocal);
     const ordem = tipo === 'geral' ? geralOrdem++ : 0;
-    out.push({ tipo, ordem, blob, arquivoOriginal, mimeType });
+    const { angulo, fonte } = parseOrientationFromFileName(nomeLocal);
+    out.push({
+      tipo,
+      ordem,
+      blob,
+      // `arquivo_original` guarda o nome sem o sufixo técnico de orientação.
+      arquivoOriginal: stripOrientationSuffix(nomeLocal),
+      mimeType,
+      rotacaoAplicada: angulo,
+      orientacaoFonte: fonte,
+    });
   }
 
   return out;
@@ -210,16 +272,16 @@ export async function syncVistoriaFotosToCloud(opts: {
       tamanho: p.blob.size,
       uploaded_at: nowIso,
       sha256,
+      rotacao_aplicada: p.rotacaoAplicada,
+      orientacao_fonte: p.orientacaoFonte,
     };
 
-    const { error: dbError } = await supabase
-      .from('vistorias_fotos')
-      .upsert(row, { onConflict: 'vistoria_id,tipo,ordem' });
+    const dbError = await upsertFotoRow(row);
 
     if (dbError) {
       uploadFailed = true;
       failedPaths.push(storagePath);
-      logFotoSyncError(`Upsert vistorias_fotos falhou (${storagePath})`, dbError.message);
+      logFotoSyncError(`Upsert vistorias_fotos falhou (${storagePath})`, dbError);
       continue;
     }
 

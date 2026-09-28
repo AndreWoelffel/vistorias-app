@@ -29,11 +29,12 @@ import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/
 import { generateUuid } from '@/lib/uuid';
 import {
   ocrWithVoting,
-  compressImage,
   detectOQAmbiguity,
   preloadAlprModels,
   runStickerPipelineYOLO,
 } from '@/lib/imageUtils';
+import { encodeOrientationInFileName } from '@/lib/imageOrientation';
+import type { CaptureMeta } from '@/components/CameraCapture';
 import { useAuth } from '@/hooks/useAuth';
 import { useRequireValidLeilao } from '@/hooks/useLeilaoRoute';
 import { toast } from '@/hooks/use-toast';
@@ -327,30 +328,42 @@ export default function NewInspection() {
       : { perfLabel: 'manual-capture' });
   }, [runOCR]);
 
-  const handleContinuousGeralCapture = useCallback(async (blob: Blob) => {
-    const compressed = await compressImage(blob);
-    const url = createTrackedUrl(compressed);
+  // O CameraCapture já devolve o blob alinhado e comprimido; aqui só nomeamos o
+  // arquivo, gravando a rotação aplicada no próprio nome (ver imageOrientation).
+  const handleContinuousGeralCapture = useCallback(async (blob: Blob, _dataUrl: string, meta: CaptureMeta) => {
+    const url = createTrackedUrl(blob);
     const timestamp = Date.now();
-    const file = new File([compressed], `FOTO_${placa || 'GERAL'}_${timestamp}.jpg`, { type: 'image/jpeg' });
-    setFotosGerais((prev) => [...prev, file]);
+    const nome = encodeOrientationInFileName(
+      `FOTO_${placa || 'GERAL'}_${timestamp}.jpg`,
+      meta.angulo,
+      meta.fonte,
+    );
+    setFotosGerais((prev) => [...prev, new File([blob], nome, { type: 'image/jpeg' })]);
     setFotosGeraisUrls((prev) => [...prev, url]);
   }, [placa]);
 
-  const handleCapture = async (blob: Blob) => {
-    if (cameraMode === 'numero') {
+  const handleCapture = async (blob: Blob, _dataUrl: string, meta: CaptureMeta) => {
+    const mode = cameraMode;
+    if (mode === 'numero') {
       handleStickerCapture(blob);
-    } else if (cameraMode === 'chassi') {
-      setCameraMode(null);
-      const compressed = await compressImage(blob);
-      const url = createTrackedUrl(compressed);
-      const file = new File([compressed], `CHASSI_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' });
+      return;
+    }
+    if (mode !== 'chassi' && mode !== 'motor') return;
+
+    setCameraMode(null);
+    const base =
+      mode === 'chassi'
+        ? `CHASSI_${placa || 'SEM_PLACA'}.jpg`
+        : `MOTOR_${placa || 'SEM_PLACA'}.jpg`;
+    const url = createTrackedUrl(blob);
+    const file = new File([blob], encodeOrientationInFileName(base, meta.angulo, meta.fonte), {
+      type: 'image/jpeg',
+    });
+
+    if (mode === 'chassi') {
       setFotoChassi(file);
       setChassiUrl(url);
-    } else if (cameraMode === 'motor') {
-      setCameraMode(null);
-      const compressed = await compressImage(blob);
-      const url = createTrackedUrl(compressed);
-      const file = new File([compressed], `MOTOR_${placa || 'SEM_PLACA'}.jpg`, { type: 'image/jpeg' });
+    } else {
       setFotoMotor(file);
       setMotorUrl(url);
     }

@@ -23,7 +23,8 @@ import { getVistoriaById, updateVistoria, deleteVistoria } from '@/hooks/useVist
 import { addToQueue, removeVistoriaQueueItems, normalizeVistoriaStatusSync } from '@/lib/db';
 import { duplicateUserMessage } from '@/services/inspectionService';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
-import { compressImage } from '@/lib/imageUtils';
+import { encodeOrientationInFileName } from '@/lib/imageOrientation';
+import type { CaptureMeta } from '@/components/CameraCapture';
 import { PLACA_SEM_PLACA, isSemPlaca } from '@/lib/placaSemPlaca';
 import { toast } from '@/hooks/use-toast';
 import type { Vistoria } from '@/lib/db';
@@ -138,24 +139,25 @@ export default function EditInspection() {
   // ════════════════════════════════════════════════════════════════════════
   // CAPTURA E GERENCIAMENTO
   // ════════════════════════════════════════════════════════════════════════
-  const handleCapture = async (blob: Blob) => {
+  const handleCapture = async (blob: Blob, _dataUrl: string, meta: CaptureMeta) => {
     const mode = cameraMode;
     setCameraMode(null);
 
-    const compressed = await compressImage(blob);
-    const url = createTrackedUrl(compressed);
+    // O CameraCapture já entrega o blob alinhado e comprimido.
+    const url = createTrackedUrl(blob);
     const ts = Date.now();
+    const nomear = (base: string) => encodeOrientationInFileName(base, meta.angulo, meta.fonte);
 
     if (mode === 'chassi') {
-      const file = new File([compressed], `CHASSI_${placa || 'SEM'}_${ts}.jpg`, { type: 'image/jpeg' });
+      const file = new File([blob], nomear(`CHASSI_${placa || 'SEM'}_${ts}.jpg`), { type: 'image/jpeg' });
       setFotoChassi(file);
       setChassiUrl(url);
     } else if (mode === 'motor') {
-      const file = new File([compressed], `MOTOR_${placa || 'SEM'}_${ts}.jpg`, { type: 'image/jpeg' });
+      const file = new File([blob], nomear(`MOTOR_${placa || 'SEM'}_${ts}.jpg`), { type: 'image/jpeg' });
       setFotoMotor(file);
       setMotorUrl(url);
     } else if (mode === 'geral') {
-      const file = new File([compressed], `FOTO_${placa || 'GERAL'}_${ts}.jpg`, { type: 'image/jpeg' });
+      const file = new File([blob], nomear(`FOTO_${placa || 'GERAL'}_${ts}.jpg`), { type: 'image/jpeg' });
       setFotosGerais((prev) => [...prev, file]);
       setFotosGeraisUrls((prev) => [...prev, url]);
     }

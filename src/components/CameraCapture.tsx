@@ -2,9 +2,30 @@ import { useRef, useState, useCallback, useEffect } from 'react';
 import { Camera, X, RotateCcw, Check, ImagePlus, Loader2, AlertTriangle, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { PlateFrameEditor } from '@/components/PlateFrameEditor';
+import {
+  isOrientationDebugAtivo,
+  OrientationDebugOverlay,
+} from '@/components/OrientationDebugOverlay';
+import {
+  prepareVehiclePhoto,
+  readDeviceOrientation,
+  requestOrientationPermission,
+  startOrientationTracking,
+  type OrientacaoAngulo,
+  type OrientacaoFonte,
+} from '@/lib/imageOrientation';
+
+/** Procedência e alinhamento já aplicados ao blob entregue ao componente pai. */
+export type CaptureMeta = {
+  origem: 'camera' | 'galeria';
+  angulo: OrientacaoAngulo;
+  fonte: OrientacaoFonte;
+};
+
+const META_SEM_ALINHAMENTO: CaptureMeta = { origem: 'camera', angulo: 0, fonte: 'none' };
 
 interface CameraCaptureProps {
-  onCapture: (blob: Blob, dataUrl: string) => void;
+  onCapture: (blob: Blob, dataUrl: string, meta: CaptureMeta) => void;
   onMultiCapture?: (blobs: Blob[]) => void;
   onCancel: () => void;
   overlayType?: 'plate' | 'number' | 'none';
@@ -13,7 +34,7 @@ interface CameraCaptureProps {
   /** Mantém a câmera aberta após cada foto (fotos gerais em sequência). */
   continuousMode?: boolean;
   continuousCount?: number;
-  onContinuousCapture?: (blob: Blob, dataUrl: string) => void;
+  onContinuousCapture?: (blob: Blob, dataUrl: string, meta: CaptureMeta) => void;
   onFinishContinuous?: () => void;
 }
 
@@ -47,9 +68,16 @@ export function CameraCapture({
   // A foto processada final (quando não precisa de crop, ex: fotos extras do carro)
   const [capturedFinal, setCapturedFinal] = useState<string | null>(null);
   const [capturedFinalBlob, setCapturedFinalBlob] = useState<Blob | null>(null);
-  
+  const [capturedFinalMeta, setCapturedFinalMeta] = useState<CaptureMeta>(META_SEM_ALINHAMENTO);
+
   const [multiFrameProgress, setMultiFrameProgress] = useState<number>(0);
   const [isCapturingMulti, setIsCapturingMulti] = useState(false);
+
+  // Alinhamento automático vale para foto livre (geral, chassi, motor). Placa e
+  // adesivo seguem pelo PlateFrameEditor e pelo pipeline de OCR, que já têm o
+  // próprio tratamento geométrico.
+  const alinhaAutomatico = overlayType === 'none';
+  const mostrarDebug = alinhaAutomatico && isOrientationDebugAtivo();
 
   // Inicialização segura anti-piscadas
   const startCamera = useCallback(async () => {
@@ -95,6 +123,15 @@ export function CameraCapture({
     };
   }, [startCamera, stopCamera]);
 
+  // O sensor demora algumas centenas de ms para emitir o primeiro evento, então
+  // precisa ser ligado ao abrir a câmera — não no instante do disparo.
+  useEffect(() => {
+    if (!alinhaAutomatico) return;
+    const parar = startOrientationTracking();
+    void requestOrientationPermission();
+    return parar;
+  }, [alinhaAutomatico]);
+
   // Limpeza de memória
   useEffect(() => {
     return () => {
@@ -102,7 +139,17 @@ export function CameraCapture({
     };
   }, [rawImageUrl]);
 
-  const captureFrame = (): Promise<{ blob: Blob; dataUrl: string } | null> => {
+  // A prévia final é um object URL (blob já alinhado), então precisa ser
+  // revogada ao trocar de foto e ao desmontar.
+  useEffect(() => {
+    return () => {
+      if (capturedFinal?.startsWith('blob:')) URL.revokeObjectURL(capturedFinal);
+    };
+  }, [capturedFinal]);
+
+  type FrameCapturado = { blob: Blob; dataUrl: string; meta: CaptureMeta };
+
+  const grabRawFrame = (): Promise<Blob | null> => {
     return new Promise((resolve) => {
       if (!videoRef.current || !canvasRef.current) return resolve(null);
       const video = videoRef.current;
@@ -122,7 +169,7 @@ export function CameraCapture({
 
         canvas.width = cropSize;
         canvas.height = cropSize;
-        
+
         // Recorta apenas o miolo do vídeo e joga no canvas
         ctx.drawImage(video, startX, startY, cropSize, cropSize, 0, 0, cropSize, cropSize);
       } else {
@@ -132,14 +179,40 @@ export function CameraCapture({
         ctx.drawImage(video, 0, 0);
       }
 
-      canvas.toBlob((blob) => {
-        if (blob) {
-          resolve({ blob, dataUrl: canvas.toDataURL('image/jpeg', 0.85) });
-        } else {
-          resolve(null);
-        }
-      }, 'image/jpeg', 0.85);
+      canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.85);
     });
+  };
+
+  const captureFrame = async (): Promise<FrameCapturado | null> => {
+    const raw = await grabRawFrame();
+    if (!raw) return null;
+
+    if (!alinhaAutomatico) {
+      const canvas = canvasRef.current!;
+      return { blob: raw, dataUrl: canvas.toDataURL('image/jpeg', 0.85), meta: META_SEM_ALINHAMENTO };
+    }
+
+    // O sensor precisa ser lido AGORA, junto do frame. Se deixássemos para o
+    // momento em que o vistoriador confirma a foto, o celular já poderia estar
+    // em outra posição e a rotação sairia errada.
+    if (readDeviceOrientation().sinais.beta === null) {
+      // iOS só concede a permissão a partir de um gesto; o toque no botão é um.
+      await requestOrientationPermission();
+    }
+
+    try {
+      const { blob, angulo, fonte } = await prepareVehiclePhoto(raw, { origem: 'camera' });
+      return {
+        blob,
+        dataUrl: URL.createObjectURL(blob),
+        meta: { origem: 'camera', angulo, fonte },
+      };
+    } catch (err) {
+      // Falha no alinhamento nunca deve custar a foto ao vistoriador.
+      console.error('Falha ao alinhar a foto; mantendo o original:', err);
+      const canvas = canvasRef.current!;
+      return { blob: raw, dataUrl: canvas.toDataURL('image/jpeg', 0.85), meta: META_SEM_ALINHAMENTO };
+    }
   };
 
   const captureSingleOrRouteToCrop = async () => {
@@ -147,7 +220,7 @@ export function CameraCapture({
     if (!result) return;
 
     if (continuousMode && onContinuousCapture) {
-      onContinuousCapture(result.blob, result.dataUrl);
+      onContinuousCapture(result.blob, result.dataUrl, result.meta);
       if ('vibrate' in navigator) navigator.vibrate(40);
       return;
     }
@@ -156,6 +229,7 @@ export function CameraCapture({
 
     if (overlayType === 'none') {
       setCapturedFinalBlob(result.blob);
+      setCapturedFinalMeta(result.meta);
       setCapturedFinal(result.dataUrl);
     } else {
       setRawImageUrl(result.dataUrl);
@@ -190,25 +264,42 @@ export function CameraCapture({
     fileInputRef.current?.click();
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
+    // Foto de galeria: a inclinação atual do aparelho não diz nada sobre ela.
+    // O único sinal válido é a tag de orientação do próprio arquivo (EXIF), que
+    // o `prepareVehiclePhoto` aplica ao decodificar.
+    let blob: Blob = file;
+    let meta: CaptureMeta = { ...META_SEM_ALINHAMENTO, origem: 'galeria' };
+
+    if (alinhaAutomatico) {
+      try {
+        const preparada = await prepareVehiclePhoto(file, { origem: 'galeria' });
+        blob = preparada.blob;
+        meta = { origem: 'galeria', angulo: preparada.angulo, fonte: preparada.fonte };
+      } catch (err) {
+        console.error('Falha ao alinhar a foto da galeria; mantendo o original:', err);
+      }
+    }
+
     if (continuousMode && onContinuousCapture) {
-      const url = URL.createObjectURL(file);
-      onContinuousCapture(file, url);
+      const url = URL.createObjectURL(blob);
+      onContinuousCapture(blob, url, meta);
       URL.revokeObjectURL(url);
       return;
     }
 
     stopCamera();
 
-    const url = URL.createObjectURL(file);
+    const url = URL.createObjectURL(blob);
 
     if (overlayType === 'none') {
       setCapturedFinal(url);
-      setCapturedFinalBlob(file);
+      setCapturedFinalBlob(blob);
+      setCapturedFinalMeta(meta);
     } else {
       setRawImageUrl(url);
     }
@@ -217,6 +308,7 @@ export function CameraCapture({
   const retake = () => {
     setCapturedFinal(null);
     setCapturedFinalBlob(null);
+    setCapturedFinalMeta(META_SEM_ALINHAMENTO);
     if (rawImageUrl) URL.revokeObjectURL(rawImageUrl);
     setRawImageUrl(null);
     setMultiFrameProgress(0);
@@ -226,7 +318,7 @@ export function CameraCapture({
 
   const confirmFinal = () => {
     if (capturedFinalBlob && capturedFinal) {
-      onCapture(capturedFinalBlob, capturedFinal);
+      onCapture(capturedFinalBlob, capturedFinal, capturedFinalMeta);
     }
   };
 
@@ -241,7 +333,7 @@ export function CameraCapture({
       <PlateFrameEditor
         imageUrl={rawImageUrl}
         overlayType={overlayType}
-        onConfirm={(blob, dataUrl) => onCapture(blob, dataUrl)}
+        onConfirm={(blob, dataUrl) => onCapture(blob, dataUrl, META_SEM_ALINHAMENTO)}
         onCancel={retake}
       />
     );
@@ -316,6 +408,8 @@ export function CameraCapture({
                   </div>
                 </div>
               )}
+
+              {mostrarDebug && <OrientationDebugOverlay />}
             </>
           )
         ) : (
