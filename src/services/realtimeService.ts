@@ -53,6 +53,7 @@ function mapRecordToLeilaoForMerge(rec: Record<string, unknown>): Leilao & { id:
     createdAt: rec.created_at ? new Date(String(rec.created_at)) : new Date(),
     updatedAt: updatedAt !== undefined && updatedAt > 0 ? updatedAt : undefined,
     createdBy: rec.created_by != null ? String(rec.created_by) : null,
+    encerrado: 'encerrado' in rec ? rec.encerrado === true : undefined,
   };
 }
 

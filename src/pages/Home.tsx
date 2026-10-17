@@ -12,6 +12,7 @@ export default function Home() {
   const safeLeiloes = (leiloes ?? []).filter(
     (l) =>
       !l.deleted &&
+      !l.encerrado &&
       l.id != null &&
       Number.isFinite(l.id) &&
       (l.id as number) > 0,

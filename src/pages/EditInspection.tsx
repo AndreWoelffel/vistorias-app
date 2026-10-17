@@ -14,7 +14,9 @@ import {
   Trash2,
   XCircle,
   Ban,
+  Download,
 } from 'lucide-react';
+import { baixarFotosDaNuvem, contarFotosNaNuvem } from '@/services/vistoriaFotoService';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
@@ -58,7 +60,6 @@ export default function EditInspection() {
   // Dados Cadastrais
   const [placa, setPlaca] = useState('');
   const [numero, setNumero] = useState('');
-  const [vistoriador, setVistoriadorField] = useState('');
 
   // Fotos Extraídas pela IA (Intocáveis manualmente na edição)
   const [fotoPlaca, setFotoPlaca] = useState<Blob | null>(null);
@@ -95,18 +96,13 @@ export default function EditInspection() {
   // ════════════════════════════════════════════════════════════════════════
   // PARSER DE FOTOS: Lê os rótulos do IndexedDB e distribui nos cards
   // ════════════════════════════════════════════════════════════════════════
-  useEffect(() => {
-    getVistoriaById(vistoriaId).then((v) => {
-      if (!v) {
-        navigate(-1);
-        return;
-      }
-
-      setVistoria(v);
-      setPlaca(v.placa || '');
-      setNumero(v.numeroVistoria || '');
-      setVistoriadorField(v.vistoriador || '');
-
+  const aplicarFotos = useCallback((v: Vistoria) => {
+      setFotoPlaca(null);
+      setFotoAdesivo(null);
+      setFotoChassi(null);
+      setChassiUrl(null);
+      setFotoMotor(null);
+      setMotorUrl(null);
       const gerais: File[] = [];
       const geraisUrls: string[] = [];
 
@@ -141,9 +137,71 @@ export default function EditInspection() {
       setFotosGeraisUrls(geraisUrls);
       setHasChassi(foundChassi);
       setHasMotor(foundMotor);
+  }, [createTrackedUrl]);
+
+  useEffect(() => {
+    getVistoriaById(vistoriaId).then((v) => {
+      if (!v) {
+        navigate(-1);
+        return;
+      }
+      setVistoria(v);
+      setPlaca(v.placa || '');
+      setNumero(v.numeroVistoria || '');
+      aplicarFotos(v);
       setLoading(false);
     });
-  }, [vistoriaId, createTrackedUrl, navigate]);
+  }, [vistoriaId, aplicarFotos, navigate]);
+
+  // Sem fotos neste celular: confere no servidor se elas existem lá.
+  const [fotosNoServidor, setFotosNoServidor] = useState<number | null>(null);
+  const [baixandoFotos, setBaixandoFotos] = useState(false);
+  useEffect(() => {
+    const cloudId = vistoria?.cloudVistoriaId?.trim();
+    if (!vistoria?.id || !cloudId || (vistoria.fotos?.length ?? 0) > 0 || !navigator.onLine) return;
+    let cancelado = false;
+    const localId = vistoria.id;
+    void contarFotosNaNuvem(cloudId).then(async (n) => {
+      if (cancelado || n == null) return;
+      setFotosNoServidor(n);
+      // Baixada por versão antiga sem a marca, ou marcada mas sem foto em lugar nenhum.
+      const soNaNuvem = n > 0;
+      if (soNaNuvem !== (vistoria.fotosSoNaNuvem === true)) {
+        await updateVistoria(localId, { fotosSoNaNuvem: soNaNuvem });
+        if (!cancelado) setVistoria((v) => (v ? { ...v, fotosSoNaNuvem: soNaNuvem } : v));
+      }
+    });
+    return () => {
+      cancelado = true;
+    };
+  }, [vistoria]);
+
+  const baixarFotos = async () => {
+    const cloudId = vistoria?.cloudVistoriaId?.trim();
+    if (!vistoria?.id || !cloudId) return;
+    setBaixandoFotos(true);
+    try {
+      const { fotos, enviadas } = await baixarFotosDaNuvem(cloudId, vistoria.placa);
+      await updateVistoria(vistoria.id, { fotos, fotosEnviadas: enviadas, fotosSoNaNuvem: false });
+      const fresh = await getVistoriaById(vistoria.id);
+      if (fresh) {
+        setVistoria(fresh);
+        aplicarFotos(fresh);
+      }
+      toast({ title: 'Fotos baixadas', description: `${fotos.length} foto(s) neste celular. Agora dá para trocar.` });
+    } catch (e) {
+      toast({
+        title: 'Não baixou as fotos',
+        description: e instanceof Error ? e.message : 'Verifique a internet e tente de novo.',
+        variant: 'destructive',
+      });
+    } finally {
+      setBaixandoFotos(false);
+    }
+  };
+
+  const semFotos =
+    !fotosSoNaNuvem && !fotoPlaca && !fotoAdesivo && !fotoChassi && !fotoMotor && fotosGerais.length === 0;
 
   // ════════════════════════════════════════════════════════════════════════
   // CAPTURA E GERENCIAMENTO
@@ -226,7 +284,6 @@ export default function EditInspection() {
       await updateVistoria(vistoriaId, {
         placa: isSemPlaca(placa) ? PLACA_SEM_PLACA : placa.toUpperCase(),
         numeroVistoria: numero,
-        vistoriador,
         fotos: fotosSoNaNuvem ? vistoria.fotos : allFotos,
         updatedAt: Date.now(),
         ...(clearingConflictOrError
@@ -516,11 +573,9 @@ export default function EditInspection() {
           </div>
           <div>
             <label className="block text-xs font-semibold text-muted-foreground mb-1">Vistoriador</label>
-            <Input 
-              value={vistoriador} 
-              onChange={(e) => setVistoriadorField(e.target.value)} 
-              className="h-14 font-medium bg-background shadow-inner" 
-            />
+            <p className="flex h-14 items-center rounded-md border border-input bg-muted/40 px-3 font-medium text-muted-foreground">
+              {vistoria?.vistoriador || '—'}
+            </p>
           </div>
         </div>
 
@@ -570,9 +625,29 @@ export default function EditInspection() {
         })()}
 
         {fotosSoNaNuvem && (
-          <div className="rounded-xl border border-border bg-card px-4 py-4 text-sm text-muted-foreground">
-            As fotos desta vistoria estão só no servidor. Aqui dá para corrigir placa, número e
-            vistoriador. Para trocar fotos, use o celular que fez a vistoria ou o Operador.
+          <div className="rounded-xl border border-border bg-card px-4 py-4 space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {fotosNoServidor != null
+                ? `As fotos desta vistoria (${fotosNoServidor}) estão no servidor, não neste celular.`
+                : 'As fotos desta vistoria estão no servidor, não neste celular.'}{' '}
+              Para trocar alguma, baixe para este celular.
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              className="w-full h-12 gap-2 font-bold"
+              disabled={baixandoFotos}
+              onClick={() => void baixarFotos()}
+            >
+              {baixandoFotos ? <Loader2 className="h-5 w-5 animate-spin" /> : <Download className="h-5 w-5" />}
+              Baixar fotos para este celular
+            </Button>
+          </div>
+        )}
+
+        {semFotos && (
+          <div className="rounded-xl border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
+            Esta vistoria não tem fotos. Você pode adicionar abaixo.
           </div>
         )}
 

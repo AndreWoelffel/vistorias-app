@@ -23,6 +23,8 @@ export interface Leilao {
   deleteBlocked?: boolean;
   /** Epoch ms — espelha `updated_at` do Supabase; last-write-wins na sync. */
   updatedAt?: number;
+  /** Encerrado no Operador: some da lista de leilões do celular. */
+  encerrado?: boolean;
 }
 
 export type SyncQueueType = 'create' | 'update' | 'delete';
@@ -153,10 +155,9 @@ export function isVistoriaSyncBlockedByDuplicate(
   return n === 'aguardando_ajuste' || n === 'conflito_duplicidade';
 }
 
-/** Vistoria cujas fotos existem só na nuvem (baixada de outro aparelho ou do Operador). */
+/** Vistoria baixada da nuvem cujas fotos ainda não vieram para este aparelho. */
 export function vistoriaComFotosSoNaNuvem(v: Vistoria): boolean {
-  if (v.fotosSoNaNuvem) return true;
-  return !(v.fotos?.length) && Boolean(v.cloudVistoriaId?.trim());
+  return v.fotosSoNaNuvem === true;
 }
 
 /** `localUuid` ou legado `externalId` no objeto local (não confundir com coluna `external_id` no Supabase). */
@@ -322,11 +323,22 @@ export async function replaceAllLeiloes(rows: (Leilao & { id: number })[]): Prom
 /**
  * Mescla um leilão vindo do Supabase sem apagar o id local (vistorias continuam com o mesmo leilaoId).
  */
+function normalizarNomeLeilao(nome: string | undefined): string {
+  return (nome ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 export async function mergeLeilaoFromCloud(cloud: Leilao & { id: number }): Promise<void> {
   const db = await getDB();
   const all = await db.getAll('leiloes');
   const list = (Array.isArray(all) ? all : []) as Leilao[];
-  const match = list.find((l) => l.supabaseId === cloud.id || l.id === cloud.id);
+  // O aviso em tempo real do INSERT pode chegar antes de o aparelho gravar o
+  // supabaseId do leilão que ele mesmo criou: aí o par é o local ainda sem id, de mesmo nome.
+  const match =
+    list.find((l) => l.supabaseId === cloud.id) ??
+    list.find(
+      (l) => l.supabaseId == null && !l.deleted && normalizarNomeLeilao(l.nome) === normalizarNomeLeilao(cloud.nome),
+    ) ??
+    list.find((l) => l.id === cloud.id && l.supabaseId == null && normalizarNomeLeilao(l.nome) === normalizarNomeLeilao(cloud.nome));
   if (match?.id != null) {
     const existing = (await db.get('leiloes', match.id)) as Leilao | undefined;
     if (!existing) return;
@@ -340,23 +352,81 @@ export async function mergeLeilaoFromCloud(cloud: Leilao & { id: number }): Prom
       createdByUserId: cloud.createdByUserId ?? existing.createdByUserId,
       createdAt: cloud.createdAt ?? existing.createdAt ?? new Date(),
       updatedAt: cloud.updatedAt ?? existing.updatedAt,
+      encerrado: cloud.encerrado ?? existing.encerrado,
       deleteBlocked: existing.deleteBlocked,
       id: match.id,
     } as any);
     return;
   }
-  await db.put('leiloes', {
+  const novo = {
     ...cloud,
     tipoLaudo: normalizeTipoLaudo(cloud.tipoLaudo),
     supabaseId: cloud.id,
     createdAt: cloud.createdAt ?? new Date(),
     updatedAt: cloud.updatedAt,
-  } as any);
+  };
+  // O id local igual ao da nuvem pode já ser de outro leilão deste aparelho.
+  if (list.some((l) => l.id === cloud.id)) {
+    const { id: _id, ...semId } = novo;
+    await db.add('leiloes', semId as any);
+    return;
+  }
+  await db.put('leiloes', novo as any);
 }
 
 export async function mergeLeiloesFromCloudRows(rows: (Leilao & { id: number })[]): Promise<void> {
   for (const row of rows) {
     await mergeLeilaoFromCloud(row);
+  }
+  await juntarLeiloesDuplicados();
+}
+
+/**
+ * Junta cópias locais do mesmo leilão da nuvem (mesmo supabaseId), criadas por
+ * versões antigas. Fica a cópia com mais vistorias; vistorias, rascunho e fila da
+ * outra passam para ela.
+ */
+export async function juntarLeiloesDuplicados(): Promise<void> {
+  const db = await getDB();
+  const leiloes = ((await db.getAll('leiloes')) ?? []) as Leilao[];
+  const grupos = new Map<number, Leilao[]>();
+  for (const l of leiloes) {
+    if (l.supabaseId == null || l.id == null) continue;
+    grupos.set(l.supabaseId, [...(grupos.get(l.supabaseId) ?? []), l]);
+  }
+  const repetidos = [...grupos.values()].filter((g) => g.length > 1);
+  if (repetidos.length === 0) return;
+
+  const vistorias = ((await db.getAll('vistorias')) ?? []) as Vistoria[];
+  for (const grupo of repetidos) {
+    const contagem = (l: Leilao) => vistorias.filter((v) => v.leilaoId === l.id).length;
+    const ordenado = [...grupo].sort((a, b) => contagem(b) - contagem(a) || (a.id as number) - (b.id as number));
+    const fica = ordenado[0].id as number;
+    const saem = new Set(ordenado.slice(1).map((l) => l.id as number));
+
+    const tx = db.transaction(['leiloes', 'vistorias', 'rascunhos', 'syncQueue'], 'readwrite');
+    for (const v of vistorias) {
+      if (v.id != null && saem.has(v.leilaoId)) {
+        await tx.objectStore('vistorias').put({ ...v, leilaoId: fica });
+      }
+    }
+    const rascunhoFica = await tx.objectStore('rascunhos').get(fica);
+    for (const id of saem) {
+      const r = (await tx.objectStore('rascunhos').get(id)) as RascunhoVistoria | undefined;
+      if (r) {
+        if (!rascunhoFica) await tx.objectStore('rascunhos').put({ ...r, leilaoId: fica });
+        await tx.objectStore('rascunhos').delete(id);
+      }
+    }
+    const fila = ((await tx.objectStore('syncQueue').getAll()) ?? []) as SyncQueueItem[];
+    for (const item of fila) {
+      const p = item.payload as { localId?: number };
+      if (item.entity === 'leilao' && p.localId != null && saem.has(p.localId)) {
+        await tx.objectStore('syncQueue').delete(item.id as number);
+      }
+    }
+    for (const id of saem) await tx.objectStore('leiloes').delete(id);
+    await tx.done;
   }
 }
 

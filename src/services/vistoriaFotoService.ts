@@ -325,6 +325,61 @@ export async function syncVistoriaFotosToCloud(opts: {
   return { placaPublicUrl, uploadFailed, uploadedCount, failedPaths, enviadas };
 }
 
+/** Quantas fotos a vistoria tem no servidor; null se não deu para conferir. */
+export async function contarFotosNaNuvem(vistoriaCloudId: string): Promise<number | null> {
+  const { count, error } = await supabase
+    .from('vistorias_fotos')
+    .select('id', { count: 'exact', head: true })
+    .eq('vistoria_id', vistoriaCloudId);
+  if (error) return null;
+  return count ?? 0;
+}
+
+const PREFIXO_POR_TIPO: Record<VistoriaFotoTipo, string> = {
+  placa: 'PLACA',
+  adesivo: 'ADESIVO',
+  chassi: 'CHASSI',
+  motor: 'MOTOR',
+  geral: 'FOTO',
+};
+
+/**
+ * Traz as fotos da nuvem para o aparelho, com os nomes que o resto do app usa
+ * (PLACA_, CHASSI_, FOTO_…). As gerais vêm na ordem da nuvem. `enviadas` marca
+ * cada uma como já enviada, para nada subir de novo se o vistoriador não mexer.
+ */
+export async function baixarFotosDaNuvem(
+  vistoriaCloudId: string,
+  placa: string,
+): Promise<{ fotos: File[]; enviadas: FotosEnviadas }> {
+  const { data, error } = await supabase
+    .from('vistorias_fotos')
+    .select('tipo, ordem, storage_path, sha256, mime_type')
+    .eq('vistoria_id', vistoriaCloudId)
+    .order('tipo', { ascending: true })
+    .order('ordem', { ascending: true });
+  if (error) throw new Error(`Não foi possível listar as fotos: ${error.message}`);
+
+  const rows = (data ?? []) as (CloudFotoRow & { mime_type?: string | null })[];
+  const fotos: File[] = [];
+  const enviadas: FotosEnviadas = {};
+  const base = (placa || 'SEM_PLACA').replace(/[^A-Za-z0-9]/g, '');
+  for (const row of rows) {
+    if (!row.tipo || row.ordem == null || !row.storage_path) continue;
+    const { data: blob, error: erroDownload } = await supabase.storage
+      .from(VISTORIA_FOTOS_BUCKET)
+      .download(row.storage_path);
+    if (erroDownload || !blob) {
+      throw new Error(`Não foi possível baixar ${row.storage_path}: ${erroDownload?.message ?? 'vazio'}`);
+    }
+    const sufixo = row.tipo === 'geral' ? `_${row.ordem}` : '';
+    const nome = `${PREFIXO_POR_TIPO[row.tipo]}_${base}${sufixo}.jpg`;
+    fotos.push(new File([blob], nome, { type: row.mime_type || blob.type || 'image/jpeg' }));
+    if (row.sha256) enviadas[fotoKey(row.tipo, row.ordem)] = row.sha256;
+  }
+  return { fotos, enviadas };
+}
+
 /**
  * Antes de DELETE em vistorias: remove arquivos do Storage, depois registros em vistorias_fotos.
  */

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   getAllLeiloes,
   getVistoriasByLeilao,
+  juntarLeiloesDuplicados,
   mergeLeiloesFromCloudRows,
   type Leilao,
   type Vistoria,
@@ -28,7 +29,20 @@ type SupabaseLeilaoRow = {
   created_at?: string | null;
   updated_at?: string | null;
   created_by?: string | null;
+  encerrado?: boolean | null;
 };
+
+const COLUNAS_LEILAO = 'id, nome, tipo_laudo, created_at, updated_at, created_by';
+
+/** Antes da migração `leiloes.encerrado` a coluna não existe; aí busca sem ela. */
+async function buscarLeiloesNaNuvem() {
+  const comEncerrado = await supabase
+    .from('leiloes')
+    .select(`${COLUNAS_LEILAO}, encerrado`)
+    .order('nome', { ascending: true });
+  if (!comEncerrado.error || !comEncerrado.error.message.includes('encerrado')) return comEncerrado;
+  return supabase.from('leiloes').select(COLUNAS_LEILAO).order('nome', { ascending: true });
+}
 
 function mapSupabaseRowToLeilao(row: SupabaseLeilaoRow): Leilao & { id: number } {
   const id = Number(row.id);
@@ -41,6 +55,7 @@ function mapSupabaseRowToLeilao(row: SupabaseLeilaoRow): Leilao & { id: number }
     createdAt: row.created_at ? new Date(row.created_at) : undefined,
     updatedAt: updatedAt !== undefined && updatedAt > 0 ? updatedAt : undefined,
     createdBy: row.created_by ?? null,
+    encerrado: row.encerrado === true,
   };
 }
 
@@ -67,6 +82,7 @@ function buildMergedLeiloesList(
         ...local,
         nome: c.nome,
         tipoLaudo: normalizeTipoLaudo(c.tipoLaudo ?? local.tipoLaudo),
+        encerrado: c.encerrado,
         supabaseId: c.id,
         createdBy: c.createdBy ?? local.createdBy,
         updatedAt: c.updatedAt ?? local.updatedAt,
@@ -96,10 +112,7 @@ export function useLeiloes() {
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('leiloes')
-        .select('id, nome, tipo_laudo, created_at, updated_at, created_by')
-        .order('nome', { ascending: true });
+      const { data, error } = await buscarLeiloesNaNuvem();
 
       const rows = (data ?? []) as SupabaseLeilaoRow[];
 
@@ -118,6 +131,7 @@ export function useLeiloes() {
       if (import.meta.env.DEV) {
         console.warn("Leilões: Supabase indisponível, usando IndexedDB", error);
       }
+      await juntarLeiloesDuplicados();
       const local = await getAllLeiloes();
       const list = Array.isArray(local) ? [...local] : [];
       list.sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
@@ -128,6 +142,7 @@ export function useLeiloes() {
         console.warn("Leilões: erro de rede, usando IndexedDB", e);
       }
       try {
+        await juntarLeiloesDuplicados().catch(() => undefined);
         const local = await getAllLeiloes();
         const list = Array.isArray(local) ? [...local] : [];
         list.sort((a, b) => (a.nome || '').localeCompare(b.nome || '', 'pt-BR'));
