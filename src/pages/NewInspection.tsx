@@ -23,7 +23,7 @@ import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { RealtimeScannerCamera, type ScanCapture } from '@/components/RealtimeScannerCamera';
 import { addVistoria } from '@/hooks/useVistorias';
-import { addToQueue, updateVistoria } from '@/lib/db';
+import { addToQueue, deleteRascunho, getRascunho, saveRascunho, updateVistoria } from '@/lib/db';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { analyzeLocalDuplicateVistoria, duplicateUserMessage } from '@/services/inspectionService';
 import { generateUuid } from '@/lib/uuid';
@@ -110,6 +110,7 @@ export default function NewInspection() {
 
   const [showCancelDialog, setShowCancelDialog] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const numeroOk = /^\d{5}$/.test(numero);
 
   // Rastreador de URLs (Memory Leak Prevention)
   const urlTracker = useRef<Set<string>>(new Set());
@@ -117,6 +118,79 @@ export default function NewInspection() {
   useEffect(() => {
     preloadAlprModels();
   }, []);
+
+  // Rascunho: retoma a vistoria aberta (app fechado, gesto de voltar, atualização)
+  // e só começa a gravar depois de ler o que já existia.
+  const [rascunhoLido, setRascunhoLido] = useState(false);
+  const finalizada = useRef(false);
+
+  useEffect(() => {
+    if (!leilaoReady || id == null || rascunhoLido) return;
+    let cancelado = false;
+    void getRascunho(id)
+      .then((r) => {
+        if (cancelado || !r) return;
+        const url = (b: Blob) => {
+          const u = URL.createObjectURL(b);
+          urlTracker.current.add(u);
+          return u;
+        };
+        setStep(r.step);
+        setPlaca(r.placa);
+        setNumero(r.numero);
+        setPlacaOriginalIA(r.placaOriginalIA);
+        setFotoPlaca(r.fotoPlaca);
+        setFotoAdesivo(r.fotoAdesivo);
+        setHasChassi(r.hasChassi);
+        setFotoChassi(r.fotoChassi);
+        setChassiUrl(r.fotoChassi ? url(r.fotoChassi) : null);
+        setHasMotor(r.hasMotor);
+        setFotoMotor(r.fotoMotor);
+        setMotorUrl(r.fotoMotor ? url(r.fotoMotor) : null);
+        setFotosGerais(r.fotosGerais);
+        setFotosGeraisUrls(r.fotosGerais.map(url));
+        toast({ title: 'Vistoria retomada', description: 'Continuando de onde você parou.' });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelado) setRascunhoLido(true);
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [leilaoReady, id, rascunhoLido]);
+
+  useEffect(() => {
+    if (!rascunhoLido || id == null || finalizada.current) return;
+    const vazio =
+      !placa && !numero && !fotoPlaca && !fotoAdesivo && !fotoChassi && !fotoMotor && fotosGerais.length === 0;
+    const t = window.setTimeout(() => {
+      if (finalizada.current) return;
+      if (vazio) {
+        void deleteRascunho(id).catch(() => undefined);
+        return;
+      }
+      void saveRascunho({
+        leilaoId: id,
+        step,
+        placa,
+        numero,
+        placaOriginalIA,
+        fotoPlaca,
+        fotoAdesivo,
+        hasChassi,
+        fotoChassi,
+        hasMotor,
+        fotoMotor,
+        fotosGerais,
+        atualizadoEm: Date.now(),
+      }).catch(() => undefined);
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [
+    rascunhoLido, id, step, placa, numero, placaOriginalIA, fotoPlaca, fotoAdesivo,
+    hasChassi, fotoChassi, hasMotor, fotoMotor, fotosGerais,
+  ]);
 
   // Limpa URLs apenas ao desmontar o componente
   useEffect(() => {
@@ -387,6 +461,11 @@ export default function NewInspection() {
       }
       return;
     }
+    if (!numeroOk) {
+      toast({ title: 'Número com 5 dígitos', description: 'O número da vistoria tem 5 dígitos.', variant: 'destructive' });
+      setStep('numero');
+      return;
+    }
 
     setIsSubmitting(true);
 
@@ -444,6 +523,8 @@ export default function NewInspection() {
         isCnnError: isCnnError || undefined,
         placaSugeridaIA: isHardExample && placaOriginalIA ? placaOriginalIA : undefined,
       });
+      finalizada.current = true;
+      await deleteRascunho(id).catch(() => undefined);
 
       const localDup = await analyzeLocalDuplicateVistoria(
         id,
@@ -493,7 +574,7 @@ export default function NewInspection() {
       setOcrConfidence(null);
       setStep('numero');
     }
-    else if (step === 'numero' && numero) {
+    else if (step === 'numero' && numeroOk) {
       setStep('fotos');
     }
     else if (step === 'fotos') {
@@ -502,7 +583,11 @@ export default function NewInspection() {
   };
 
   const handleCancel = () => setShowCancelDialog(true);
-  const confirmCancel = () => navigate(afterInspectionPath(id), { replace: true });
+  const confirmCancel = () => {
+    finalizada.current = true;
+    void deleteRascunho(id).catch(() => undefined);
+    navigate(afterInspectionPath(id), { replace: true });
+  };
 
   // ════════════════════════════════════════════════════════════════════════
   // RENDERIZAÇÃO
@@ -1178,7 +1263,7 @@ export default function NewInspection() {
               type="submit"
               disabled={
                 isSubmitting ||
-                (step === 'placa' ? !placa : step === 'numero' ? !numero : false)
+                (step === 'placa' ? !placa : step === 'numero' ? !numeroOk : false)
               }
               className="h-14 flex-1 text-lg font-bold rounded-xl shadow-lg"
             >

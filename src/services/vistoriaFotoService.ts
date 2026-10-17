@@ -34,11 +34,15 @@ type CloudFotoRow = {
   sha256?: string;
 };
 
+/** Chave `tipo:ordem` → sha256 da foto que este aparelho enviou. */
+export type FotosEnviadas = Record<string, string>;
+
 export type SyncVistoriaFotosResult = {
   placaPublicUrl: string | null;
   uploadFailed: boolean;
   uploadedCount: number;
   failedPaths: string[];
+  enviadas: FotosEnviadas;
 };
 
 const REQUIRED_TIPOS: VistoriaFotoTipo[] = ['placa', 'adesivo'];
@@ -184,16 +188,23 @@ async function deleteCloudFotoRows(ids: string[]): Promise<boolean> {
 
 /**
  * Sincroniza fotos locais com Storage + vistorias_fotos.
- * Remove da nuvem fotos que não existem mais localmente (Storage primeiro, depois DB).
+ *
+ * O Operador gira e troca fotos na nuvem, e uma vistoria baixada de outro aparelho
+ * chega aqui sem as fotos. Por isso só se mexe no que este aparelho enviou
+ * (`enviadasAntes`): foto que já subiu e não mudou aqui não é reenviada, e só sai
+ * da nuvem a foto que este aparelho enviou e o vistoriador tirou depois.
  */
 export async function syncVistoriaFotosToCloud(opts: {
   leilaoFk: number;
   vistoriaCloudId: string;
   fotos: Blob[] | undefined | null;
+  enviadasAntes?: FotosEnviadas;
 }): Promise<SyncVistoriaFotosResult> {
   const { leilaoFk, vistoriaCloudId, fotos } = opts;
+  const enviadasAntes = opts.enviadasAntes ?? {};
   const parsed = parseLocalFotos(fotos);
   const localKeys = new Set(parsed.map((p) => fotoKey(p.tipo, p.ordem)));
+  const enviadas: FotosEnviadas = {};
 
   let uploadFailed = false;
   let uploadedCount = 0;
@@ -210,17 +221,21 @@ export async function syncVistoriaFotosToCloud(opts: {
 
   const toRemove = existing.filter((row) => {
     if (row.tipo == null || row.ordem == null) return false;
-    return !localKeys.has(fotoKey(row.tipo, row.ordem));
+    const key = fotoKey(row.tipo, row.ordem);
+    return key in enviadasAntes && !localKeys.has(key);
   });
 
   if (toRemove.length > 0) {
     const paths = toRemove.map((r) => String(r.storage_path ?? '')).filter(Boolean);
     const storageOk = await removeStoragePaths(paths);
-    if (!storageOk) uploadFailed = true;
-    else {
-      const ids = toRemove.map((r) => String(r.id ?? '')).filter(Boolean);
-      const dbOk = await deleteCloudFotoRows(ids);
-      if (!dbOk) uploadFailed = true;
+    const ids = toRemove.map((r) => String(r.id ?? '')).filter(Boolean);
+    const dbOk = storageOk && (await deleteCloudFotoRows(ids));
+    if (!dbOk) {
+      uploadFailed = true;
+      for (const row of toRemove) {
+        const key = fotoKey(row.tipo as VistoriaFotoTipo, row.ordem as number);
+        enviadas[key] = enviadasAntes[key];
+      }
     }
   }
 
@@ -235,13 +250,18 @@ export async function syncVistoriaFotosToCloud(opts: {
     } catch (err) {
       uploadFailed = true;
       failedPaths.push(storagePath);
+      if (enviadasAntes[key]) enviadas[key] = enviadasAntes[key];
       logFotoSyncError(`SHA-256 falhou (${storagePath})`, err);
       continue;
     }
 
     const prev = existingByKey.get(key);
-    if (prev?.sha256 === sha256 && prev.storage_path === storagePath) {
+    const jaEnviada = prev?.sha256 === sha256 || enviadasAntes[key] === sha256;
+    // Sem registro do que este aparelho enviou (vistoria de versão antiga), a nuvem vence.
+    const legadoNaNuvem = prev != null && opts.enviadasAntes == null;
+    if (prev && (jaEnviada || legadoNaNuvem)) {
       okKeys.add(key);
+      enviadas[key] = sha256;
       if (p.tipo === 'placa' && prev.storage_path) {
         placaPublicUrl = getVistoriaFotoPublicUrl(String(prev.storage_path));
       }
@@ -256,6 +276,7 @@ export async function syncVistoriaFotosToCloud(opts: {
     if (storageError) {
       uploadFailed = true;
       failedPaths.push(storagePath);
+      if (enviadasAntes[key]) enviadas[key] = enviadasAntes[key];
       logFotoSyncError(`Upload falhou (${storagePath})`, storageError.message);
       continue;
     }
@@ -281,11 +302,13 @@ export async function syncVistoriaFotosToCloud(opts: {
     if (dbError) {
       uploadFailed = true;
       failedPaths.push(storagePath);
+      if (enviadasAntes[key]) enviadas[key] = enviadasAntes[key];
       logFotoSyncError(`Upsert vistorias_fotos falhou (${storagePath})`, dbError);
       continue;
     }
 
     okKeys.add(key);
+    enviadas[key] = sha256;
     if (p.tipo === 'placa') {
       placaPublicUrl = getVistoriaFotoPublicUrl(storagePath);
     }
@@ -299,7 +322,7 @@ export async function syncVistoriaFotosToCloud(opts: {
     logFotoSyncError('Sync incompleto', { failedPaths, uploadedCount, total: parsed.length });
   }
 
-  return { placaPublicUrl, uploadFailed, uploadedCount, failedPaths };
+  return { placaPublicUrl, uploadFailed, uploadedCount, failedPaths, enviadas };
 }
 
 /**

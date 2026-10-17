@@ -3,10 +3,19 @@ import react from "@vitejs/plugin-react-swc";
 import path from "path";
 import { componentTagger } from "lovable-tagger";
 import { VitePWA } from "vite-plugin-pwa";
+import { readFileSync } from "fs";
+
+const pacote = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf-8")) as {
+  version: string;
+};
+const versaoApp = `${pacote.version} · ${new Date().toLocaleDateString("pt-BR")}`;
 
 export default defineConfig(({ mode }) => ({
   /** Somente VITE_* no client — evita importar NEXT_PUBLIC_* do SO com chave errada. */
   envPrefix: ["VITE_"],
+  define: {
+    __APP_VERSION__: JSON.stringify(versaoApp),
+  },
   /** Sourcemaps para stack traces apontarem para arquivos .tsx/.ts (debug). */
   build: {
     sourcemap: mode !== "production",
@@ -25,7 +34,8 @@ export default defineConfig(({ mode }) => ({
     VitePWA({
       /** Service Worker gerado pelo Workbox; precache do shell + assets estáticos. */
       strategies: "generateSW",
-      registerType: "autoUpdate",
+      /** A versão nova espera o toque em Atualizar na tela inicial (ver src/lib/pwaUpdate.ts). */
+      registerType: "prompt",
       /** Registro manual em main.tsx (virtual:pwa-register). */
       injectRegister: false,
       includeAssets: [
@@ -72,6 +82,16 @@ export default defineConfig(({ mode }) => ({
             urlPattern: /^https:\/\/[^/]+\.supabase\.co\/.*/i,
             handler: "NetworkOnly",
             options: { cacheName: "supabase-api" },
+          },
+          /** Modelos de leitura (~62 MB): grandes demais para o precache; ficam no aparelho no primeiro uso. */
+          {
+            urlPattern: ({ url, sameOrigin }) => sameOrigin && /^\/model_[^/]+\//.test(url.pathname),
+            handler: "CacheFirst",
+            options: {
+              cacheName: "modelos-leitura",
+              expiration: { maxEntries: 40 },
+              cacheableResponse: { statuses: [200] },
+            },
           },
           {
             urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/.*/i,

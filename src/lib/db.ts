@@ -38,7 +38,7 @@ export interface SyncQueueItem {
   payload: unknown;
   createdAt: number;
   retries: number;
-  /** Estado persistente: `failed` após esgotar retries (ver `syncService.MAX_SYNC_RETRIES`). */
+  /** `failed` só existe em itens de versões antigas; hoje a fila tenta de novo para sempre. */
   status?: SyncQueueItemStatus;
   /** Legado: preferir `status === 'failed'`. */
   failed?: boolean;
@@ -101,6 +101,10 @@ export interface Vistoria {
   syncMessage?: string;
   /** Upload da foto ao Storage falhou (vistoria pode ter seguido sem URL). */
   fotoUploadFailed?: boolean;
+  /** `tipo:ordem` → sha256 das fotos que este aparelho enviou (ver `syncVistoriaFotosToCloud`). */
+  fotosEnviadas?: Record<string, string>;
+  /** Veio da nuvem sem as fotos: o aparelho não pode trocar nem apagar fotos dela. */
+  fotosSoNaNuvem?: boolean;
   /** Tipo de duplicidade quando `aguardando_ajuste` ou `conflito_duplicidade`. */
   duplicateType?: VistoriaDuplicateType;
   /** Valores em conflito (ex.: placa ou número repetido). */
@@ -149,6 +153,12 @@ export function isVistoriaSyncBlockedByDuplicate(
   return n === 'aguardando_ajuste' || n === 'conflito_duplicidade';
 }
 
+/** Vistoria cujas fotos existem só na nuvem (baixada de outro aparelho ou do Operador). */
+export function vistoriaComFotosSoNaNuvem(v: Vistoria): boolean {
+  if (v.fotosSoNaNuvem) return true;
+  return !(v.fotos?.length) && Boolean(v.cloudVistoriaId?.trim());
+}
+
 /** `localUuid` ou legado `externalId` no objeto local (não confundir com coluna `external_id` no Supabase). */
 export function readStableUuid(v: Vistoria): string | undefined {
   const fromNew = v.localUuid?.trim();
@@ -185,7 +195,7 @@ let dbPromise: Promise<IDBPDatabase<any>> | null = null;
 
 function getDB() {
   if (!dbPromise) {
-    dbPromise = openDB('VistoriaDB', 11, {
+    dbPromise = openDB('VistoriaDB', 12, {
       async upgrade(db, oldVersion, _newVersion, transaction) {
         /** v5: remove leilões antigos (ex.: seed/mock) e recria store — fonte de verdade passa a ser Supabase + cache local. */
         if (oldVersion > 0 && oldVersion < 5 && db.objectStoreNames.contains('leiloes')) {
@@ -221,10 +231,46 @@ function getDB() {
             cursor = await cursor.continue();
           }
         }
+        /** v12: rascunho da Nova vistoria, um por leilão, para não perder nada antes de Concluir. */
+        if (!db.objectStoreNames.contains('rascunhos')) {
+          db.createObjectStore('rascunhos', { keyPath: 'leilaoId' });
+        }
       },
     });
   }
   return dbPromise;
+}
+
+/** Nova vistoria ainda não concluída. Fica no aparelho até Concluir ou Descartar. */
+export interface RascunhoVistoria {
+  leilaoId: number;
+  step: 'placa' | 'numero' | 'fotos';
+  placa: string;
+  numero: string;
+  placaOriginalIA: string | null;
+  fotoPlaca: Blob | null;
+  fotoAdesivo: Blob | null;
+  hasChassi: boolean;
+  fotoChassi: File | null;
+  hasMotor: boolean;
+  fotoMotor: File | null;
+  fotosGerais: File[];
+  atualizadoEm: number;
+}
+
+export async function getRascunho(leilaoId: number): Promise<RascunhoVistoria | undefined> {
+  const db = await getDB();
+  return db.get('rascunhos', leilaoId) as Promise<RascunhoVistoria | undefined>;
+}
+
+export async function saveRascunho(r: RascunhoVistoria): Promise<void> {
+  const db = await getDB();
+  await db.put('rascunhos', r);
+}
+
+export async function deleteRascunho(leilaoId: number): Promise<void> {
+  const db = await getDB();
+  await db.delete('rascunhos', leilaoId);
 }
 
 async function getVistoriaByIdRaw(id: number): Promise<Vistoria | undefined> {
@@ -365,6 +411,13 @@ export async function setSyncQueueItemRetryPaused(id: number, paused: boolean): 
   await db.put('syncQueue', { ...row, retryPaused: paused } as any);
 }
 
+export async function clearQueueItemBackoff(id: number): Promise<void> {
+  const db = await getDB();
+  const row = (await db.get('syncQueue', id)) as SyncQueueItem | undefined;
+  if (!row) return;
+  await db.put('syncQueue', { ...row, nextAttemptAfter: undefined } as any);
+}
+
 /** Remove da fila todas as operações `leilao/delete` para o id local. */
 export async function removeLeilaoDeleteFromQueue(localLeilaoId: number): Promise<void> {
   const items = await getQueue();
@@ -379,9 +432,16 @@ export async function removeLeilaoDeleteFromQueue(localLeilaoId: number): Promis
   await tx.done;
 }
 
+/** Espera antes da próxima tentativa: 15 s, 30 s, 1 min, 2 min, 4 min e depois 5 min. */
+export function queueRetryDelayMs(retries: number): number {
+  const base = 15_000 * 2 ** Math.max(0, retries - 1);
+  return Math.min(5 * 60_000, base);
+}
+
 /**
- * Registra falha na fila: incrementa retries e define `status: 'failed'` se esgotou tentativas.
- * O atraso entre tentativas é aplicado em `syncService` (linear: retries × 1s, máx. 5s).
+ * Registra falha na fila. O item nunca desiste sozinho: no pátio o sinal some por
+ * horas e a vistoria precisa subir quando ele voltar, sem o vistoriador tocar em nada.
+ * `reachedLimit` só avisa a tela de que já passou de `maxRetries` tentativas.
  */
 export async function applyQueueFailure(
   id: number,
@@ -389,14 +449,13 @@ export async function applyQueueFailure(
     maxRetries: number;
     errorMessage?: string;
   },
-): Promise<{ retries: number; permanentFailure: boolean }> {
+): Promise<{ retries: number; reachedLimit: boolean }> {
   const db = await getDB();
   const row = (await db.get('syncQueue', id)) as SyncQueueItem | undefined;
-  if (!row) return { retries: 0, permanentFailure: true };
+  if (!row) return { retries: 0, reachedLimit: true };
 
   const retries = (row.retries ?? 0) + 1;
-  const permanentFailure = retries >= opts.maxRetries;
-  const status: SyncQueueItemStatus = permanentFailure ? 'failed' : 'pending';
+  const status: SyncQueueItemStatus = 'pending';
   const lastError =
     opts.errorMessage != null && opts.errorMessage !== ''
       ? String(opts.errorMessage).slice(0, 500)
@@ -407,11 +466,11 @@ export async function applyQueueFailure(
     retries,
     status,
     failed: undefined,
-    nextAttemptAfter: undefined,
+    nextAttemptAfter: Date.now() + queueRetryDelayMs(retries),
     lastError,
   } as any);
 
-  return { retries, permanentFailure };
+  return { retries, reachedLimit: retries >= opts.maxRetries };
 }
 
 /** Remove itens da fila ligados a um leilão (ex.: exclusão local antes de sync). */

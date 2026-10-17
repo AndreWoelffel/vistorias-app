@@ -1,5 +1,6 @@
 /**
- * Fila offline-first: retries com delay linear antes de cada tentativa (retries×1s, máx. 5s).
+ * Fila offline-first. Cada falha agenda a próxima tentativa (`queueRetryDelayMs`, até 5 min)
+ * e o item nunca é abandonado; o `SyncBridge` chama `processQueue` de tempos em tempos.
  */
 import { supabase } from '@/services/supabaseClient';
 import {
@@ -14,6 +15,7 @@ import {
   deleteVistoriasByLeilao,
   deleteLeilaoFromDb,
   setSyncQueueItemRetryPaused,
+  clearQueueItemBackoff,
   normalizeVistoriaStatusSync,
   addToQueue,
   removeVistoriaQueueItems,
@@ -26,9 +28,8 @@ import { deleteVistoriaFotosBeforeVistoriaDelete } from '@/services/vistoriaFoto
 import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict';
 import { normalizeTipoLaudo } from '@/lib/tipoLaudo';
 
+/** Depois de tantas falhas seguidas a vistoria aparece como erro, mas a fila segue tentando. */
 export const MAX_SYNC_RETRIES = 5;
-/** Máximo de espera antes de reprocessar um item com falhas anteriores (ms). */
-const RETRY_DELAY_CAP_MS = 5_000;
 
 const MAX_ROUNDS = 12;
 
@@ -96,35 +97,23 @@ export function isSyncProcessing(): boolean {
   return queueProcessing;
 }
 
-export function isQueueItemPermanentFailure(item: SyncQueueItem): boolean {
+/** Já falhou várias vezes seguidas (a tela mostra como erro); continua na fila. */
+export function isQueueItemComErro(item: SyncQueueItem): boolean {
   if (item.status === 'failed') return true;
   if (item.failed === true) return true;
-  if ((item.retries ?? 0) >= MAX_SYNC_RETRIES) return true;
-  return false;
+  return (item.retries ?? 0) >= MAX_SYNC_RETRIES;
 }
 
-function isActionableItem(item: SyncQueueItem, _now: number): boolean {
-  if (isQueueItemPermanentFailure(item)) return false;
+function isActionableItem(item: SyncQueueItem, now: number): boolean {
   if (item.retryPaused) return false;
-  return true;
-}
-
-function retryDelayBeforeAttemptMs(retries: number): number {
-  return Math.min(RETRY_DELAY_CAP_MS, Math.max(0, retries) * 1000);
-}
-
-async function sleepLinearRetryDelay(retries: number): Promise<void> {
-  const ms = retryDelayBeforeAttemptMs(retries);
-  if (ms <= 0) return;
-  await new Promise<void>((resolve) => setTimeout(resolve, ms));
+  return item.nextAttemptAfter == null || item.nextAttemptAfter <= now;
 }
 
 export async function getSyncQueueCounts(): Promise<{ pending: number; failed: number }> {
-  const now = Date.now();
-  const items = await getQueue();
+  const items = (await getQueue()).filter((i) => !i.retryPaused);
   return {
-    pending: items.filter((i) => isActionableItem(i, now)).length,
-    failed: items.filter((i) => isQueueItemPermanentFailure(i)).length,
+    pending: items.filter((i) => !isQueueItemComErro(i)).length,
+    failed: items.filter((i) => isQueueItemComErro(i)).length,
   };
 }
 
@@ -164,39 +153,38 @@ function formatErr(e: unknown): string {
   return String(e ?? 'erro desconhecido');
 }
 
-async function recordFailure(itemId: number, err?: unknown): Promise<{ permanentFailure: boolean }> {
-  const { permanentFailure, retries } = await applyQueueFailure(itemId, {
+async function recordFailure(itemId: number, err?: unknown): Promise<{ reachedLimit: boolean }> {
+  const { reachedLimit, retries } = await applyQueueFailure(itemId, {
     maxRetries: MAX_SYNC_RETRIES,
-    errorMessage: formatErr(err),
+    errorMessage: err != null ? formatErr(err) : undefined,
   });
-  if (permanentFailure && import.meta.env.DEV) {
-    console.warn('[sync] Fila em falha permanente:', err != null ? err : `id=${itemId}, retries=${retries}`);
+  if (reachedLimit && import.meta.env.DEV) {
+    console.warn('[sync] Item falhando há várias tentativas:', err != null ? err : `id=${itemId}, retries=${retries}`);
   }
-  return { permanentFailure };
+  return { reachedLimit };
 }
 
 async function markVistoriaErroSyncIfPermanent(
   item: SyncQueueItem,
-  permanentFailure: boolean,
+  reachedLimit: boolean,
   err?: unknown,
 ): Promise<void> {
-  if (!permanentFailure || item.entity !== 'vistoria') return;
+  if (!reachedLimit || item.entity !== 'vistoria') return;
   const p = item.payload as { localVistoriaId?: number };
   const vid = p.localVistoriaId;
   if (vid == null || !Number.isFinite(vid)) return;
+  const syncMessage = err != null ? formatErr(err).slice(0, 240) : 'Sem conexão com o servidor. Tentando de novo.';
   try {
     if (item.type === 'delete') {
-      await updateVistoria(vid, {
-        pendingCloudDelete: false,
-        statusSync: 'erro_sync',
-        syncMessage: formatErr(err).slice(0, 240),
-      });
+      // A exclusão continua pendente; só avisa na tela.
+      await updateVistoria(vid, { syncMessage });
       return;
     }
-    await updateVistoria(vid, {
-      statusSync: 'erro_sync',
-      syncMessage: formatErr(err).slice(0, 240),
-    });
+    const v = await getVistoriaById(vid);
+    // Duplicidade já tem a própria mensagem e status; não troca por erro de rede.
+    const ns = normalizeVistoriaStatusSync(v?.statusSync);
+    if (ns === 'conflito_duplicidade' || ns === 'aguardando_ajuste') return;
+    await updateVistoria(vid, { statusSync: 'erro_sync', syncMessage });
   } catch {
     /* ignore */
   }
@@ -375,9 +363,8 @@ export async function processQueue(): Promise<ProcessQueueResult> {
 
   if (typeof navigator !== 'undefined' && !navigator.onLine) {
     const q = await getQueue();
-    const remainingInBackoff = q.filter(
-      (i) => !isQueueItemPermanentFailure(i) && (i.retries ?? 0) > 0 && (i.retries ?? 0) < MAX_SYNC_RETRIES,
-    ).length;
+    const now = Date.now();
+    const remainingInBackoff = q.filter((i) => !i.retryPaused && (i.nextAttemptAfter ?? 0) > now).length;
     return { processed: 0, failed: 0, skipped: true, rounds: 0, remainingInBackoff };
   }
 
@@ -413,10 +400,6 @@ export async function processQueue(): Promise<ProcessQueueResult> {
 
         if (typeof navigator !== "undefined" && !navigator.onLine) break;
 
-        await sleepLinearRetryDelay(item.retries ?? 0);
-
-        if (typeof navigator !== "undefined" && !navigator.onLine) break;
-
         try {
           const result = await processOneItem(item);
           if (result === 'done' || result === 'cleared') {
@@ -428,14 +411,14 @@ export async function processQueue(): Promise<ProcessQueueResult> {
           } else if (result === 'skip') {
             // No-op
           } else {
-            const { permanentFailure } = await recordFailure(item.id);
-            await markVistoriaErroSyncIfPermanent(item, permanentFailure);
+            const { reachedLimit } = await recordFailure(item.id);
+            await markVistoriaErroSyncIfPermanent(item, reachedLimit);
             failed++;
             progressed = true;
           }
         } catch (e) {
-          const { permanentFailure } = await recordFailure(item.id, e);
-          await markVistoriaErroSyncIfPermanent(item, permanentFailure, e);
+          const { reachedLimit } = await recordFailure(item.id, e);
+          await markVistoriaErroSyncIfPermanent(item, reachedLimit, e);
           failed++;
           progressed = true;
         }
@@ -451,9 +434,9 @@ export async function processQueue(): Promise<ProcessQueueResult> {
   const queueSnapshot = await getQueue();
   const nowEnd = Date.now();
   const remainingActionable = queueSnapshot.filter((i) => isActionableItem(i, nowEnd)).length;
-  const remainingFailed = queueSnapshot.filter((i) => isQueueItemPermanentFailure(i)).length;
+  const remainingFailed = queueSnapshot.filter((i) => !i.retryPaused && isQueueItemComErro(i)).length;
   const remainingInBackoff = queueSnapshot.filter(
-    (i) => !isQueueItemPermanentFailure(i) && (i.retries ?? 0) > 0 && (i.retries ?? 0) < MAX_SYNC_RETRIES,
+    (i) => !i.retryPaused && (i.nextAttemptAfter ?? 0) > nowEnd,
   ).length;
 
   const lifecycleDetail: SyncLifecycleDetail = {
@@ -491,6 +474,16 @@ export async function syncLeilaoFromCloud(localLeilaoId: number): Promise<SyncLe
   } catch {
     return { ok: false, message: 'Erro de sincronização.' };
   }
+}
+
+/** Botão "Enviar agora": tira a espera de todos os itens e sincroniza o leilão. */
+export async function enviarTudoAgora(localLeilaoId: number): Promise<SyncLeilaoFromCloudResult> {
+  const fila = await getQueue();
+  for (const item of fila) {
+    if (item.id == null || item.retryPaused || item.nextAttemptAfter == null) continue;
+    await clearQueueItemBackoff(item.id);
+  }
+  return syncLeilaoFromCloud(localLeilaoId);
 }
 
 export type EnqueueVistoriaResyncResult =
@@ -547,7 +540,10 @@ export async function retryVistoriaFromHub(
 
   if (ns === 'erro_sync' || ns === 'pendente_sync' || v.fotoUploadFailed) {
     const r = await enqueueVistoriaResync(localVistoriaId);
-    if (!r.ok) return { ok: false, message: r.message ?? 'Não foi possível reenviar.' };
+    if (!r.ok) {
+      const message = 'message' in r ? r.message : undefined;
+      return { ok: false, message: message ?? 'Não foi possível reenviar.' };
+    }
     return { ok: true };
   }
 

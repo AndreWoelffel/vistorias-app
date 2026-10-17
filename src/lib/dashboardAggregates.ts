@@ -261,6 +261,10 @@ export async function listLeilaoSyncQueueEntries(
 export type LeilaoHubSnapshot = {
   latest: LeilaoSyncQueueEntry | null;
   duplicates: LeilaoSyncQueueEntry[];
+  /** Vistorias deste aparelho que ainda não terminaram de subir (dados ou fotos). */
+  aEnviar: number;
+  /** Dessas, as que já falharam várias vezes seguidas. */
+  comErro: number;
 };
 
 export async function getLeilaoHubSnapshot(leilaoId: number): Promise<LeilaoHubSnapshot> {
@@ -271,7 +275,16 @@ export async function getLeilaoHubSnapshot(leilaoId: number): Promise<LeilaoHubS
       isVistoriaSyncBlockedByDuplicate(e.statusSync) &&
       e.vistoriaId !== latest?.vistoriaId,
   );
-  return { latest, duplicates };
+  let aEnviar = 0;
+  let comErro = 0;
+  for (const e of sorted) {
+    if (isVistoriaSyncBlockedByDuplicate(e.statusSync)) continue;
+    const st = normalizeVistoriaStatusSync(e.statusSync);
+    const erro = e.queueFailed || st === "erro_sync";
+    if (erro || st === "pendente_sync" || e.inQueue || e.fotoUploadFailed) aEnviar += 1;
+    if (erro) comErro += 1;
+  }
+  return { latest, duplicates, aEnviar, comErro };
 }
 
 export async function dashboardCountsForLeilao(leilaoId: number) {

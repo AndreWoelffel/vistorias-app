@@ -13,6 +13,7 @@ import {
   updateVistoria,
   isValidUuid,
   readStableUuid,
+  vistoriaComFotosSoNaNuvem,
   type Vistoria,
   type VistoriaDuplicateConflictPeer,
   type VistoriaDuplicateInfo,
@@ -23,6 +24,7 @@ import { logSyncConflict, supabaseTimestampToMs } from '@/services/syncConflict'
 import { mergeVistoriasFromCloudRows } from '@/services/vistoriaCloudMerge';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { syncVistoriaFotosToCloud } from '@/services/vistoriaFotoService';
+import { garantirVinculoLeilao } from '@/services/vinculoLeilao';
 import { normalizeTipoLaudo } from '@/lib/tipoLaudo';
 import { isSemPlaca } from '@/lib/placaSemPlaca';
 
@@ -94,15 +96,24 @@ export async function fetchAndMergeVistoriasFromCloudForLeilao(
   // MÁGICA DO ARQUITETO 3: Impede a busca fantasma se for NaN
   if (fk == null || Number.isNaN(fk)) return { ok: false, rowCount: 0, removedLocal: 0 };
 
-  const { data, error } = await supabase
-    .from('vistorias_com_leilao')
-    .select('*')
-    .eq('leilao_id', fk)
-    .order('created_at', { ascending: false });
+  // O servidor devolve no máximo 1000 linhas por pedido. A limpeza do aparelho
+  // apaga o que não veio, então só segue com a lista completa.
+  const PAGINA = 1000;
+  const rows: Record<string, unknown>[] = [];
+  for (let inicio = 0; ; inicio += PAGINA) {
+    const { data, error } = await supabase
+      .from('vistorias_com_leilao')
+      .select('*')
+      .eq('leilao_id', fk)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(inicio, inicio + PAGINA - 1);
+    if (error) return { ok: false, rowCount: 0, removedLocal: 0 };
+    const pagina = (data ?? []) as Record<string, unknown>[];
+    rows.push(...pagina);
+    if (pagina.length < PAGINA) break;
+  }
 
-  if (error) return { ok: false, rowCount: 0, removedLocal: 0 };
-
-  const rows = (data ?? []) as Record<string, unknown>[];
   const { removedLocal } = await mergeVistoriasFromCloudRows(localLeilaoId, rows);
   return { ok: true, rowCount: rows.length, removedLocal };
 }
@@ -115,7 +126,7 @@ const DATASET_BUCKET = 'dataset-minerado';
  */
 async function uploadHardExample(v: Vistoria): Promise<void> {
   if (!v.isHardExample || !v.placaSugeridaIA) return;
-  const foto = v.fotos?.[0];
+  const foto = v.fotos?.find((f) => ((f as File).name ?? '').startsWith('PLACA_'));
   if (!foto || foto.size <= 0) return;
 
   const errorType: 'yolo' | 'cnn' = v.isYoloError ? 'yolo' : 'cnn';
@@ -338,11 +349,21 @@ async function syncFotosForCloudVistoria(
   leilaoLocalId: number | undefined,
   vistoriaCloudId: string,
   fotos: Blob[],
+  localVistoriaId?: number,
 ): Promise<{ placaPublicUrl: string | null; uploadFailed: boolean }> {
   if (leilaoLocalId == null) return { placaPublicUrl: null, uploadFailed: false };
+  const local = localVistoriaId != null ? await getVistoriaById(localVistoriaId) : undefined;
+  if (local && vistoriaComFotosSoNaNuvem(local)) return { placaPublicUrl: null, uploadFailed: false };
   const leilaoFk = await ensureLeilaoSupabaseId(leilaoLocalId);
   if (leilaoFk == null) return { placaPublicUrl: null, uploadFailed: fotos.length > 0 };
-  return syncVistoriaFotosToCloud({ leilaoFk, vistoriaCloudId, fotos });
+  const r = await syncVistoriaFotosToCloud({
+    leilaoFk,
+    vistoriaCloudId,
+    fotos,
+    enviadasAntes: local?.fotosEnviadas,
+  });
+  if (localVistoriaId != null) await updateVistoria(localVistoriaId, { fotosEnviadas: r.enviadas });
+  return r;
 }
 
 /** Sobe fotos locais e atualiza url_foto (placa). Idempotente — seguro reexecutar. */
@@ -353,7 +374,12 @@ async function pushLocalFotosToCloud(opts: {
   localVistoriaId?: number;
 }): Promise<{ uploadFailed: boolean }> {
   if (!opts.fotos.length) return { uploadFailed: false };
-  const fotoSync = await syncFotosForCloudVistoria(opts.leilaoId, opts.cloudVistoriaId, opts.fotos);
+  const fotoSync = await syncFotosForCloudVistoria(
+    opts.leilaoId,
+    opts.cloudVistoriaId,
+    opts.fotos,
+    opts.localVistoriaId,
+  );
   if (fotoSync.placaPublicUrl) {
     await supabase.from('vistorias').update({ url_foto: fotoSync.placaPublicUrl }).eq('id', opts.cloudVistoriaId);
   }
@@ -377,13 +403,13 @@ export async function retryVistoriaFotoUpload(localVistoriaId: number): Promise<
   return !uploadFailed;
 }
 
-/** Reenvia todas as fotos locais das vistorias já na nuvem (idempotente). */
+/** Reenvia as fotos que falharam nas vistorias já na nuvem (idempotente). */
 export async function resyncAllFotosForLeilao(localLeilaoId: number): Promise<void> {
   const list = await getVistoriasByLeilao(localLeilaoId, { includePendingCloudDelete: false });
   for (const v of list) {
     const cloudId = v.cloudVistoriaId?.trim();
     if (v.id == null || !cloudId || !isValidUuid(cloudId)) continue;
-    if (!v.fotos?.length) continue;
+    if (!v.fotoUploadFailed || !v.fotos?.length) continue;
     if (normalizeVistoriaStatusSync(v.statusSync) === 'rascunho') continue;
     await pushLocalFotosToCloud({
       leilaoId: localLeilaoId,
@@ -452,6 +478,16 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
 
     // FLUXO UPDATE
     if (ex?.id != null) {
+      if (data.leilaoId != null) {
+        const fk = await ensureLeilaoSupabaseId(data.leilaoId);
+        if (fk == null) return false;
+        const vinculo = await garantirVinculoLeilao(cloudRowId, fk);
+        if (!vinculo.ok) {
+          if (localVid != null) await marcarDuplicadoDoServidor(localVid, data, vinculo.duplicado);
+          return false;
+        }
+      }
+
       const serverMs = supabaseTimestampToMs(ex.updated_at);
       if (serverMs === localMs) {
         const localFotos = resolveInspectionFotos(data);
@@ -474,10 +510,22 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
       logSyncConflict({ entity: 'vistoria', fluxo: 'create/sync', external_id: extUuid, localVistoriaId: localVid, serverMs, localMs, resolucao: serverMs > localMs ? 'servidor' : 'local' });
 
       if (serverMs > localMs) {
+        // O servidor vence nos dados, mas um envio interrompido pode ter deixado as fotos para trás.
+        const localFotos = resolveInspectionFotos(data);
+        const fotos =
+          localFotos.length > 0
+            ? await pushLocalFotosToCloud({
+                leilaoId: data.leilaoId,
+                cloudVistoriaId: cloudRowId,
+                fotos: localFotos,
+                localVistoriaId: localVid ?? undefined,
+              })
+            : { uploadFailed: false };
         if (localVid != null) {
           await updateVistoria(localVid, {
             placa: String(ex.placa ?? ''), numeroVistoria: String(ex.num_vistoria ?? ''), vistoriador: String(ex.vistoriador ?? ''),
-            statusSync: 'sincronizado', updatedAt: serverMs, cloudVistoriaId: String(ex.id), ...clearedDuplicateFields,
+            statusSync: 'sincronizado', updatedAt: serverMs, cloudVistoriaId: String(ex.id),
+            fotoUploadFailed: fotos.uploadFailed, ...clearedDuplicateFields,
           });
         }
         return true;
@@ -485,7 +533,7 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
 
       let urlFoto: string | null = ex.url_foto != null ? String(ex.url_foto) : null;
       const localFotos = resolveInspectionFotos(data);
-      const fotoSync = await syncFotosForCloudVistoria(data.leilaoId, cloudRowId, localFotos);
+      const fotoSync = await syncFotosForCloudVistoria(data.leilaoId, cloudRowId, localFotos, localVid ?? undefined);
       if (fotoSync.placaPublicUrl) urlFoto = fotoSync.placaPublicUrl;
       if (localVid != null && fotoSync.uploadFailed) await updateVistoria(localVid, { fotoUploadFailed: true });
 
@@ -569,25 +617,28 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
     }
 
     const insRow = ins as { id?: string; updated_at?: string | null } | null;
-    
-    // MÁGICA DO ARQUITETO 4: A barreira final antes de mandar pro Supabase
-    if (insRow?.id && fkToLink != null && !Number.isNaN(fkToLink)) {
-      const { error: relError } = await supabase.from('vistorias_leiloes').insert({
-        vistoria_id: insRow.id,
-        leilao_id: fkToLink
-      });
-      if (relError && import.meta.env.DEV) {
-         console.error("[Supabase] Falha ao vincular vistoria ao leilão:", relError.message);
+    if (!insRow?.id) throw new Error('O servidor não devolveu o id da vistoria.');
+
+    if (fkToLink != null && !Number.isNaN(fkToLink)) {
+      // Se o vínculo falhar por rede, o erro sobe e a próxima tentativa acha a linha
+      // pelo external_id e refaz o vínculo no FLUXO UPDATE.
+      const vinculo = await garantirVinculoLeilao(String(insRow.id), fkToLink);
+      if (!vinculo.ok) {
+        // Linha recém-criada, sem fotos e invisível fora do leilão: não fica órfã na nuvem.
+        await supabase.from('vistorias').delete().eq('id', insRow.id);
+        if (localVid != null) await marcarDuplicadoDoServidor(localVid, data, vinculo.duplicado);
+        return false;
       }
     }
 
     let fotoUploadFailed = false;
-    if (insRow?.id && fkToLink != null && !Number.isNaN(fkToLink) && localFotosInsert.length > 0) {
+    if (fkToLink != null && !Number.isNaN(fkToLink) && localFotosInsert.length > 0) {
       const fotoSync = await syncVistoriaFotosToCloud({
         leilaoFk: fkToLink,
         vistoriaCloudId: String(insRow.id),
         fotos: localFotosInsert,
       });
+      if (localVid != null) await updateVistoria(localVid, { fotosEnviadas: fotoSync.enviadas });
       fotoUploadFailed = fotoSync.uploadFailed;
       if (fotoSync.placaPublicUrl) {
         await supabase.from('vistorias').update({ url_foto: fotoSync.placaPublicUrl }).eq('id', insRow.id);
@@ -603,8 +654,22 @@ export async function saveInspection(data: InspectionData): Promise<boolean> {
     return true;
   } catch (error) {
     console.error("[Supabase] Erro ao salvar vistoria:", error);
-    return false;
+    throw error;
   }
+}
+
+async function marcarDuplicadoDoServidor(
+  localVid: number,
+  data: InspectionData,
+  type: VistoriaDuplicateType,
+): Promise<void> {
+  await updateVistoria(localVid, {
+    statusSync: 'conflito_duplicidade',
+    syncMessage: duplicateUserMessage(type),
+    duplicateType: type,
+    duplicateInfo: buildDuplicateInfo(type, normPlaca(data.placa), normNumVistoria(data.numero_vistoria)),
+  });
+  if (data.leilaoId != null) await recalculateDuplicateVistoriasForLeilao(data.leilaoId);
 }
 
 export type SyncInspectionFromLocalResult = 'ok' | 'fail' | 'duplicate';
@@ -707,7 +772,7 @@ export async function syncVistoriaUpdateToCloud(localVistoriaId: number): Promis
     }
   }
 
-  const fotoSync = await syncFotosForCloudVistoria(v.leilaoId, cloudId, v.fotos ?? []);
+  const fotoSync = await syncFotosForCloudVistoria(v.leilaoId, cloudId, v.fotos ?? [], localVistoriaId);
   let urlFoto: string | null = ex.url_foto != null ? String(ex.url_foto) : null;
   if (fotoSync.placaPublicUrl) urlFoto = fotoSync.placaPublicUrl;
   if (fotoSync.uploadFailed) await updateVistoria(localVistoriaId, { fotoUploadFailed: true });

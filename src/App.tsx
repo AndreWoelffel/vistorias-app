@@ -16,6 +16,7 @@ import LeiloesPage from "./pages/LeiloesPage";
 import UsuariosPage from "./pages/UsuariosPage";
 import NotFound from "./pages/NotFound";
 import { SyncBridge } from "@/components/SyncBridge";
+import { SessaoGuard } from "@/components/SessaoGuard";
 import { SyncNotifications } from "@/components/SyncNotifications";
 import { InstallPwaPrompt } from "@/components/InstallPwaPrompt";
 
@@ -41,6 +42,7 @@ const App = () => (
       <Sonner />
       <BrowserRouter>
         <SyncBridge />
+        <SessaoGuard />
         <SyncNotifications />
         <InstallPwaPrompt />
         <Routes>

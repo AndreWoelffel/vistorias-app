@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ClipboardCheck, ChevronDown, LogOut, Gavel, Users } from 'lucide-react';
+import { ClipboardCheck, ChevronDown, LogOut, Gavel, Users, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useLeiloes } from '@/hooks/useVistorias';
 import { useAuth } from '@/hooks/useAuth';
 import { leilaoEntryPath } from '@/config/appMode';
+import { VERSAO_APP, aplicarAtualizacao, useAtualizacaoPronta } from '@/lib/pwaUpdate';
 
 export default function Home() {
   const { leiloes, loading: loadingLeiloes } = useLeiloes();
@@ -18,6 +19,7 @@ export default function Home() {
   const { user, logout } = useAuth();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const navigate = useNavigate();
+  const atualizacaoPronta = useAtualizacaoPronta();
 
   if (!user) {
     navigate('/auth', { replace: true });
@@ -51,6 +53,19 @@ export default function Home() {
             Olá, <span className="font-bold text-foreground">{user.nome}</span>
           </p>
         </div>
+
+        {atualizacaoPronta && (
+          <div className="rounded-xl border border-primary/40 bg-primary/[0.06] px-4 py-3 space-y-3">
+            <p className="text-sm text-foreground">
+              <span className="font-bold">Nova versão do app.</span> Suas vistorias continuam
+              guardadas.
+            </p>
+            <Button type="button" className="w-full h-11 gap-2 font-bold rounded-lg" onClick={aplicarAtualizacao}>
+              <Download className="h-4 w-4" />
+              Atualizar agora
+            </Button>
+          </div>
+        )}
 
         {/* Formulário Central */}
         <form 
@@ -131,6 +146,7 @@ export default function Home() {
             <LogOut className="h-4 w-4" />
             Sair da conta
           </Button>
+          <p className="text-center text-[11px] text-muted-foreground/70 tabular-nums">Versão {VERSAO_APP}</p>
         </div>
 
       </div>

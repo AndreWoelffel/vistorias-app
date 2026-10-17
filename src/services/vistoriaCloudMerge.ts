@@ -2,7 +2,9 @@
  * Mescla linhas de public.vistorias no IndexedDB (Realtime + pull do Histórico).
  */
 import { supabaseTimestampToMs } from '@/services/syncConflict';
+import { supabase } from '@/services/supabaseClient';
 import {
+  addToQueue,
   addVistoria,
   deleteVistoria,
   findVistoriaIdByCloudId,
@@ -144,6 +146,7 @@ export async function applyVistoriaInsert(row: Record<string, unknown>): Promise
     numeroVistoria: String(row.num_vistoria ?? ''),
     vistoriador: String(row.vistoriador ?? ''),
     fotos: [],
+    fotosSoNaNuvem: true,
     statusSync: 'sincronizado',
     createdAt: row.created_at ? new Date(String(row.created_at)) : new Date(),
     localUuid: externalId,
@@ -245,6 +248,34 @@ function shouldPreserveLocalFromCloudReconcile(v: Vistoria): boolean {
   return n === 'rascunho' || n === 'pendente_sync' || n === 'erro_sync';
 }
 
+/**
+ * Ids que ainda existem em public.vistorias. A lista do leilão só mostra vistorias
+ * vinculadas; uma que perdeu o vínculo some dela sem ter sido apagada.
+ * Devolve null se não deu para conferir — aí nada é apagado do aparelho.
+ */
+async function idsQueAindaExistemNaNuvem(
+  coluna: 'id' | 'external_id',
+  valores: string[],
+): Promise<Set<string> | null> {
+  const existem = new Set<string>();
+  for (let i = 0; i < valores.length; i += 100) {
+    const lote = valores.slice(i, i + 100);
+    const { data, error } = await supabase.from('vistorias').select(coluna).in(coluna, lote);
+    if (error) return null;
+    for (const row of (data ?? []) as Record<string, unknown>[]) {
+      if (row[coluna] != null) existem.add(String(row[coluna]));
+    }
+  }
+  return existem;
+}
+
+/** Vistoria ainda na nuvem mas fora do leilão: volta para a fila, que refaz o vínculo. */
+async function reenviarVistoriaSemVinculo(localId: number): Promise<void> {
+  await removeVistoriaQueueItems(localId);
+  await updateVistoria(localId, { statusSync: 'pendente_sync', syncMessage: undefined });
+  await addToQueue({ type: 'create', entity: 'vistoria', payload: { localVistoriaId: localId } });
+}
+
 async function removeLocalVistoriaIfExists(localId: number): Promise<boolean> {
   const v = await getVistoriaById(localId);
   if (!v?.id) return false;
@@ -278,29 +309,48 @@ export async function reconcileLocalVistoriasWithCloudRows(
   let removed = 0;
 
   // 1) Fantasmas: tinham cloudVistoriaId mas sumiram do servidor (mesmo com status duplicidade).
-  for (const v of locals) {
-    if (v.id == null) continue;
+  const fantasmas = locals.filter((v) => {
     const cloudId = v.cloudVistoriaId?.trim();
-    if (!cloudId || cloudIds.has(cloudId)) continue;
-    if (v.pendingCloudDelete || (await removeLocalVistoriaIfExists(v.id))) {
-      removed += 1;
+    return v.id != null && Boolean(cloudId) && !cloudIds.has(cloudId as string);
+  });
+  const fantasmasNaNuvem =
+    fantasmas.length > 0
+      ? await idsQueAindaExistemNaNuvem('id', fantasmas.map((v) => String(v.cloudVistoriaId).trim()))
+      : new Set<string>();
+  if (fantasmasNaNuvem) {
+    for (const v of fantasmas) {
+      if (v.id == null) continue;
+      if (fantasmasNaNuvem.has(String(v.cloudVistoriaId).trim())) {
+        if (!v.pendingCloudDelete) await reenviarVistoriaSemVinculo(v.id);
+        continue;
+      }
+      if (v.pendingCloudDelete || (await removeLocalVistoriaIfExists(v.id))) {
+        removed += 1;
+      }
     }
   }
 
   const localsAfterGhost = await getVistoriasByLeilao(localLeilaoId, { includePendingCloudDelete: true });
 
   // 2) external_id sincronizado que não existe mais na nuvem.
-  for (const v of localsAfterGhost) {
-    if (v.id == null) continue;
-    if (v.pendingCloudDelete) continue;
-    if (shouldPreserveLocalFromCloudReconcile(v)) continue;
-
-    const cloudId = v.cloudVistoriaId?.trim();
-    if (cloudId) continue;
-
+  const semId = localsAfterGhost.filter((v) => {
+    if (v.id == null || v.pendingCloudDelete) return false;
+    if (shouldPreserveLocalFromCloudReconcile(v)) return false;
+    if (v.cloudVistoriaId?.trim()) return false;
     const ext = readStableUuid(v);
-    const ns = normalizeVistoriaStatusSync(v.statusSync);
-    if (ns === 'sincronizado' && ext && !externalIds.has(ext)) {
+    return normalizeVistoriaStatusSync(v.statusSync) === 'sincronizado' && Boolean(ext) && !externalIds.has(ext as string);
+  });
+  const semIdNaNuvem =
+    semId.length > 0
+      ? await idsQueAindaExistemNaNuvem('external_id', semId.map((v) => readStableUuid(v) as string))
+      : new Set<string>();
+  if (semIdNaNuvem) {
+    for (const v of semId) {
+      if (v.id == null) continue;
+      if (semIdNaNuvem.has(readStableUuid(v) as string)) {
+        await reenviarVistoriaSemVinculo(v.id);
+        continue;
+      }
       if (await removeLocalVistoriaIfExists(v.id)) removed += 1;
     }
   }

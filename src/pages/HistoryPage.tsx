@@ -93,7 +93,9 @@ export default function HistoryPage() {
       if (!merged.ok) {
         toast({
           title: 'Não sincronizou',
-          description: merged.message ?? 'Não foi possível buscar os dados do servidor.',
+          description:
+            ('message' in merged ? merged.message : undefined) ??
+            'Não foi possível buscar os dados do servidor.',
           variant: 'destructive',
         });
         return;

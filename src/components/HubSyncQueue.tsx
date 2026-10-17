@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Loader2, Pencil, RefreshCw } from "lucide-react";
+import { Download, Loader2, Pencil, RefreshCw } from "lucide-react";
+import { aplicarAtualizacao, useAtualizacaoPronta } from "@/lib/pwaUpdate";
 import { Button } from "@/components/ui/button";
 import { useAutoSyncLeilaoOnEnter } from "@/hooks/useAutoSyncLeilaoOnEnter";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
@@ -11,11 +12,13 @@ import {
   type LeilaoSyncQueueEntry,
 } from "@/lib/dashboardAggregates";
 import {
+  getRascunho,
   isVistoriaSyncBlockedByDuplicate,
   normalizeVistoriaStatusSync,
+  type RascunhoVistoria,
 } from "@/lib/db";
 import { duplicateTypeShortLabel } from "@/services/inspectionService";
-import { retryVistoriaFromHub, subscribeSyncUi } from "@/services/syncService";
+import { enviarTudoAgora, retryVistoriaFromHub, subscribeSyncUi } from "@/services/syncService";
 import { subscribeRealtimeUi } from "@/services/realtimeService";
 import { cn } from "@/lib/utils";
 
@@ -160,9 +163,17 @@ function VistoriaCard({
 export function HubSyncQueue({ leilaoId }: Props) {
   const navigate = useNavigate();
   const { pendingCount, syncing } = useSyncStatus();
-  const [snapshot, setSnapshot] = useState<LeilaoHubSnapshot>({ latest: null, duplicates: [] });
+  const atualizacaoPronta = useAtualizacaoPronta();
+  const [snapshot, setSnapshot] = useState<LeilaoHubSnapshot>({
+    latest: null,
+    duplicates: [],
+    aEnviar: 0,
+    comErro: 0,
+  });
+  const [rascunho, setRascunho] = useState<RascunhoVistoria | null>(null);
   const [loading, setLoading] = useState(true);
   const [retryingId, setRetryingId] = useState<number | null>(null);
+  const [enviando, setEnviando] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -171,13 +182,34 @@ export function HubSyncQueue({ leilaoId }: Props) {
       );
       await recalculateDuplicateVistoriasForLeilao(leilaoId);
       setSnapshot(await getLeilaoHubSnapshot(leilaoId));
+      setRascunho((await getRascunho(leilaoId).catch(() => undefined)) ?? null);
     } catch (e) {
       console.error("[HubSyncQueue]", e);
-      setSnapshot({ latest: null, duplicates: [] });
+      setSnapshot({ latest: null, duplicates: [], aEnviar: 0, comErro: 0 });
     } finally {
       setLoading(false);
     }
   }, [leilaoId]);
+
+  const handleEnviarAgora = useCallback(async () => {
+    setEnviando(true);
+    try {
+      const r = await enviarTudoAgora(leilaoId);
+      if (!r.ok) {
+        const offline = "offline" in r && r.offline;
+        toast({
+          title: offline ? "Sem internet" : "Ainda não enviou",
+          description: offline
+            ? "As vistorias ficam guardadas e sobem sozinhas quando o sinal voltar."
+            : "O app continua tentando sozinho.",
+          variant: "destructive",
+        });
+      }
+      await load();
+    } finally {
+      setEnviando(false);
+    }
+  }, [leilaoId, load]);
 
   useAutoSyncLeilaoOnEnter(leilaoId, true, load);
 
@@ -201,7 +233,7 @@ export function HubSyncQueue({ leilaoId }: Props) {
     };
   }, [load]);
 
-  const { latest, duplicates } = snapshot;
+  const { latest, duplicates, aEnviar, comErro } = snapshot;
   const goEdit = (vid: number) => navigate(`/editar/${vid}`);
 
   const handleRetry = useCallback(async (vistoriaId: number) => {
@@ -212,7 +244,8 @@ export function HubSyncQueue({ leilaoId }: Props) {
         toast({ title: "Reenvio iniciado", description: "Sincronizando em segundo plano." });
         void load();
       } else {
-        toast({ title: "Não foi possível reenviar", description: result.message, variant: "destructive" });
+        const message = "message" in result ? result.message : undefined;
+        toast({ title: "Não foi possível reenviar", description: message, variant: "destructive" });
       }
     } finally {
       setRetryingId(null);
@@ -221,6 +254,73 @@ export function HubSyncQueue({ leilaoId }: Props) {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col w-full max-w-md mx-auto px-4 gap-6">
+      {atualizacaoPronta && !rascunho && (
+        <div className="shrink-0 rounded-lg border border-primary/40 bg-primary/[0.06] px-4 py-3">
+          <p className="text-sm text-foreground">
+            <span className="font-bold">Nova versão do app.</span> Suas vistorias continuam guardadas.
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            className="mt-3 h-9 w-full rounded-lg text-xs font-bold gap-1.5"
+            onClick={aplicarAtualizacao}
+          >
+            <Download className="h-3.5 w-3.5" />
+            Atualizar agora
+          </Button>
+        </div>
+      )}
+
+      {rascunho && (
+        <div className="shrink-0 rounded-lg border border-primary/40 bg-primary/[0.06] px-4 py-3">
+          <p className="text-sm font-bold text-foreground">Vistoria não concluída</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {rascunho.placa ? `Placa ${rascunho.placa}` : "Sem placa ainda"}
+            {rascunho.numero ? ` · Nº ${rascunho.numero}` : ""} · {formatShortTime(rascunho.atualizadoEm)}
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            className="mt-3 h-9 w-full rounded-lg text-xs font-bold"
+            onClick={() => navigate(`/vistoria/${leilaoId}`)}
+          >
+            Continuar vistoria
+          </Button>
+        </div>
+      )}
+
+      {aEnviar > 0 && (
+        <div
+          className={cn(
+            "shrink-0 rounded-lg border px-4 py-3",
+            comErro > 0 ? "border-red-500/50 bg-red-500/[0.06]" : "border-amber-500/30 bg-amber-500/[0.04]",
+          )}
+        >
+          <p className="text-sm font-bold text-foreground">
+            {aEnviar === 1 ? "1 vistoria aguardando envio" : `${aEnviar} vistorias aguardando envio`}
+            {comErro > 0 ? ` · ${comErro} com erro` : ""}
+          </p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Estão guardadas no celular e sobem sozinhas quando houver sinal.
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-3 h-9 w-full rounded-lg text-xs font-bold gap-1.5"
+            disabled={enviando || syncing}
+            onClick={() => void handleEnviarAgora()}
+          >
+            {enviando || syncing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            Enviar agora
+          </Button>
+        </div>
+      )}
+
       {/* Última vistoria */}
       <div className="shrink-0">
         <h3 className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-2">

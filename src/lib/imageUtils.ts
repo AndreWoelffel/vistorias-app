@@ -80,6 +80,7 @@ export async function loadYOLOModel(): Promise<tf.GraphModel | tf.LayersModel | 
           return await tf.loadLayersModel('/model_yolo_placas/model.json');
         } catch (e2) {
           console.error('[ALPR YOLO] Falha ao carregar o modelo de placa', e2);
+          yoloModelPromise = null;
           return null;
         }
       }
@@ -100,6 +101,7 @@ export async function loadYOLOVistoriasModel(): Promise<tf.GraphModel | tf.Layer
           return await tf.loadLayersModel('/model_yolo_vistorias/model.json');
         } catch (e2) {
           console.error('[YOLO Vistorias] Falha ao carregar o modelo de adesivo', e2);
+          yoloVistoriasModelPromise = null;
           return null;
         }
       }
@@ -121,6 +123,7 @@ export async function loadCNNModel(): Promise<tf.GraphModel | tf.LayersModel | n
           return await tf.loadLayersModel('/model_cnn/model.json');
         } catch (e2) {
           console.error('[ALPR CNN] Falha crítica ao carregar a CNN', e2);
+          cnnModelPromise = null;
           return null;
         }
       }

@@ -20,7 +20,13 @@ import { Input } from '@/components/ui/input';
 import { AppHeader } from '@/components/AppHeader';
 import { CameraCapture } from '@/components/CameraCapture';
 import { getVistoriaById, updateVistoria, deleteVistoria } from '@/hooks/useVistorias';
-import { addToQueue, removeVistoriaQueueItems, normalizeVistoriaStatusSync } from '@/lib/db';
+import {
+  addToQueue,
+  removeVistoriaQueueItems,
+  normalizeVistoriaStatusSync,
+  vistoriaComFotosSoNaNuvem,
+} from '@/lib/db';
+import { useAuth } from '@/hooks/useAuth';
 import { duplicateUserMessage } from '@/services/inspectionService';
 import { recalculateDuplicateVistoriasForLeilao } from '@/services/duplicateVistoriaRecalc';
 import { encodeOrientationInFileName } from '@/lib/imageOrientation';
@@ -35,8 +41,11 @@ export default function EditInspection() {
   const { id } = useParams();
   const navigate = useNavigate();
   const vistoriaId = Number(id);
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
 
   const [vistoria, setVistoria] = useState<Vistoria | null>(null);
+  const fotosSoNaNuvem = vistoria != null && vistoriaComFotosSoNaNuvem(vistoria);
 
   // Estados da UI
   const [loading, setLoading] = useState(true);
@@ -184,6 +193,14 @@ export default function EditInspection() {
       });
       return;
     }
+    if (numero.length !== 5) {
+      toast({
+        title: 'Número com 5 dígitos',
+        description: 'O número da vistoria tem 5 dígitos.',
+        variant: 'destructive',
+      });
+      return;
+    }
     
     if (!vistoria) return;
     setSaving(true);
@@ -210,7 +227,7 @@ export default function EditInspection() {
         placa: isSemPlaca(placa) ? PLACA_SEM_PLACA : placa.toUpperCase(),
         numeroVistoria: numero,
         vistoriador,
-        fotos: allFotos,
+        fotos: fotosSoNaNuvem ? vistoria.fotos : allFotos,
         updatedAt: Date.now(),
         ...(clearingConflictOrError
           ? {
@@ -304,6 +321,15 @@ export default function EditInspection() {
       }
       const cloudId = v.cloudVistoriaId?.trim();
       const syncedToCloud = Boolean(cloudId);
+
+      if (syncedToCloud && !isAdmin) {
+        toast({
+          title: 'Só o administrador apaga',
+          description: 'Esta vistoria já foi enviada. Peça ao administrador para apagar.',
+          variant: 'destructive',
+        });
+        return;
+      }
 
       if (!syncedToCloud) {
         const lid = v.leilaoId;
@@ -543,8 +569,15 @@ export default function EditInspection() {
           );
         })()}
 
+        {fotosSoNaNuvem && (
+          <div className="rounded-xl border border-border bg-card px-4 py-4 text-sm text-muted-foreground">
+            As fotos desta vistoria estão só no servidor. Aqui dá para corrigir placa, número e
+            vistoriador. Para trocar fotos, use o celular que fez a vistoria ou o Operador.
+          </div>
+        )}
+
         {/* FOTOS TÉCNICAS E GERAIS */}
-        <div className="space-y-4">
+        <div className={fotosSoNaNuvem ? 'hidden' : 'space-y-4'}>
           <div className="flex items-center gap-2">
              <div className="h-0.5 flex-1 bg-border/50"></div>
              <p className="text-xs font-black text-muted-foreground uppercase tracking-widest">Identificação e Fotos</p>
@@ -682,13 +715,15 @@ export default function EditInspection() {
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={handleDelete}
-          className="w-full py-3 mt-4 mb-2 text-sm font-bold text-destructive/80 hover:text-destructive underline-offset-4 hover:underline transition-colors"
-        >
-          Apagar vistoria (Irreversível)
-        </button>
+        {(isAdmin || !vistoria?.cloudVistoriaId?.trim()) && (
+          <button
+            type="button"
+            onClick={handleDelete}
+            className="w-full py-3 mt-4 mb-2 text-sm font-bold text-destructive/80 hover:text-destructive underline-offset-4 hover:underline transition-colors"
+          >
+            Apagar vistoria (Irreversível)
+          </button>
+        )}
       </div>
 
       <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-border bg-background/95 backdrop-blur-md px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))]">
