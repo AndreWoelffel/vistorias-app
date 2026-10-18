@@ -15,6 +15,7 @@ import {
   type UpdateLeilaoPatch,
 } from '@/services/leilaoService';
 import { supabase } from '@/services/supabaseClient';
+import { comPrazo } from '@/services/usuariosOffline';
 import { supabaseTimestampToMs } from '@/services/syncConflict';
 import { ensureRealtimeStarted, subscribeRealtimeUi } from '@/services/realtimeService';
 import { normalizeTipoLaudo, type TipoLaudo } from '@/lib/tipoLaudo';
@@ -112,7 +113,8 @@ export function useLeiloes() {
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) setLoading(true);
     try {
-      const { data, error } = await buscarLeiloesNaNuvem();
+      // Sinal fraco pode pendurar o pedido; aí vale a lista guardada no aparelho.
+      const { data, error } = await comPrazo(buscarLeiloesNaNuvem(), 8_000);
 
       const rows = (data ?? []) as SupabaseLeilaoRow[];
 

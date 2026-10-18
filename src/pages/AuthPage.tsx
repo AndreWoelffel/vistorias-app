@@ -7,6 +7,18 @@ import { useAuth } from '@/hooks/useAuth';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { toast } from '@/hooks/use-toast';
 import { listUsersByRole, login as loginUsuario, type UsuarioListItem } from '@/services/userService';
+import {
+  comPrazo,
+  entrarSemInternet,
+  guardarUsuariosNoAparelho,
+  usuariosGuardados,
+} from '@/services/usuariosOffline';
+
+const PRAZO_MS = 8_000;
+
+function dataCurta(ms: number): string {
+  return new Date(ms).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
 
 const PIN_REGEX = /^\d{4}$/;
 
@@ -18,6 +30,7 @@ export default function AuthPage() {
   const [usuarios, setUsuarios] = useState<UsuarioListItem[]>([]);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  const [semInternetDesde, setSemInternetDesde] = useState<number | null>(null);
   const [selected, setSelected] = useState<UsuarioListItem | null>(null);
   const [pin, setPin] = useState('');
   const [showPin, setShowPin] = useState(false);
@@ -35,20 +48,30 @@ export default function AuthPage() {
     let cancelled = false;
     setListLoading(true);
     setListError(null);
+    setSemInternetDesde(null);
     setSelected(null);
     setPin('');
+
+    const usarGuardados = (motivo: string) => {
+      const guardados = usuariosGuardados(role);
+      if (guardados && guardados.usuarios.length > 0) {
+        setUsuarios(guardados.usuarios);
+        setSemInternetDesde(guardados.atualizadoEm);
+        return;
+      }
+      setUsuarios([]);
+      setListError(motivo);
+    };
 
     void (async () => {
       try {
         if (!online) {
-          if (!cancelled) {
-            setUsuarios([]);
-            setListError('Sem internet. Conecte-se para carregar a lista de usuários.');
-          }
+          if (!cancelled) usarGuardados('Sem internet e sem lista guardada. Conecte-se uma vez para carregar.');
           return;
         }
-        const rows = await listUsersByRole(role);
+        const rows = await comPrazo(listUsersByRole(role), PRAZO_MS);
         const safe = Array.isArray(rows) ? rows : [];
+        void guardarUsuariosNoAparelho();
         if (!cancelled) {
           setUsuarios(safe);
           if (safe.length === 0) {
@@ -57,8 +80,7 @@ export default function AuthPage() {
         }
       } catch (e) {
         if (!cancelled) {
-          setUsuarios([]);
-          setListError(e instanceof Error ? e.message : 'Não foi possível carregar a lista de usuários.');
+          usarGuardados(e instanceof Error ? e.message : 'Não foi possível carregar a lista de usuários.');
         }
       } finally {
         if (!cancelled) setListLoading(false);
@@ -82,7 +104,17 @@ export default function AuthPage() {
 
     setSubmitting(true);
     try {
-      const data = await loginUsuario(selected.nome, pin);
+      let data: { id: string; nome: string; role: string } | null;
+      if (semInternetDesde != null) {
+        data = entrarSemInternet(selected.id, pin);
+      } else {
+        try {
+          data = await comPrazo(loginUsuario(selected.nome, pin), PRAZO_MS);
+        } catch {
+          // Sinal caiu entre a lista e o Entrar: confere com a lista guardada.
+          data = entrarSemInternet(selected.id, pin);
+        }
+      }
       if (data == null) {
         toast({
           title: 'Acesso negado',
@@ -190,6 +222,13 @@ export default function AuthPage() {
                 <p className="text-sm text-destructive text-center">{listError}</p>
               </div>
             ) : (
+              <>
+              {semInternetDesde != null && (
+                <p className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <WifiOff className="h-3.5 w-3.5 shrink-0" />
+                  Sem internet. Lista guardada neste celular em {dataCurta(semInternetDesde)}.
+                </p>
+              )}
               <ul className="max-h-48 overflow-y-auto rounded-lg border border-border divide-y divide-border">
                 {(usuarios ?? []).map((u) => (
                   <li key={u.id}>
@@ -207,6 +246,7 @@ export default function AuthPage() {
                   </li>
                 ))}
               </ul>
+              </>
             )}
           </div>
 

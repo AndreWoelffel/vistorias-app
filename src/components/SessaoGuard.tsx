@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 import { supabase } from '@/services/supabaseClient';
+import { guardarUsuariosNoAparelho } from '@/services/usuariosOffline';
 
 const STORAGE_KEY = 'currentUser';
 const INTERVALO_MS = 10 * 60_000;
@@ -22,6 +23,8 @@ function lerSessao(): Sessao | null {
  * As vistorias guardadas continuam na fila e sobem mesmo depois de sair.
  */
 async function conferirSessao(): Promise<void> {
+  // Mantém a lista para o login sem internet em dia (PIN redefinido, usuário novo).
+  void guardarUsuariosNoAparelho();
   const sessao = lerSessao();
   if (!sessao?.id) return;
   const { data, error } = await supabase
